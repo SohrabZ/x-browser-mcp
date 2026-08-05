@@ -186,8 +186,10 @@ func TestABadURLIsTheCallersMistakeNotAFault(t *testing.T) {
 		"",
 		"not a url at all",
 		"https://example.com/someone/status/222",
-		"https://x.com/search",
-		"https://x.com/i/lists/",
+		"https://x.com/search",      // no q
+		"https://x.com/i/lists/",    // no list id
+		"https://x.com/i/somewhere", // an /i/ route this cannot read
+		"https://x.com/settings",    // a reserved path that is not a timeline
 	} {
 		_, _, err := r.FromURL(context.Background(), raw, 5)
 		if err == nil {
