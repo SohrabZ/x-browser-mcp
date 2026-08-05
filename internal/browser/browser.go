@@ -329,8 +329,12 @@ func clearLockOwnedBy(profileDir string, pid int) {
 	if !known {
 		return // no lock
 	}
-	if owner > 0 && owner != pid {
-		return // belongs to someone else
+	// Only a lock we can positively attribute to the process we just watched
+	// die. An owner of zero means the lock is unreadable or was written by
+	// another host -- in both cases it is someone's claim and not ours to
+	// remove, and removing it would invite a second Chrome onto the profile.
+	if owner != pid {
+		return
 	}
 	_ = ClearStale(profileDir)
 }

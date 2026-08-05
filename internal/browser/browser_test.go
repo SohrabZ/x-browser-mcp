@@ -499,3 +499,39 @@ func TestALockFromAnotherHostIsHeld(t *testing.T) {
 		t.Fatal("another host's lock must be treated as held, whatever that pid means locally")
 	}
 }
+
+// Cleanup removes our own leftover lock, never someone else's. A lock we cannot
+// attribute -- unreadable, or written by another machine -- is a claim, and
+// deleting it is how two Chromes end up on one profile.
+func TestCleanupLeavesAnUnattributableLockAlone(t *testing.T) {
+	t.Run("another host", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Symlink("some-other-host-4242", filepath.Join(dir, "SingletonLock")); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		clearLockOwnedBy(dir, 4242) // same pid number, different machine
+		if !InUse(dir) {
+			t.Fatal("another host's lock was removed")
+		}
+	})
+
+	t.Run("unreadable", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "SingletonLock"), []byte("junk"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		clearLockOwnedBy(dir, 4242)
+		if !InUse(dir) {
+			t.Fatal("a lock we could not read was removed")
+		}
+	})
+
+	t.Run("our own", func(t *testing.T) {
+		dir := t.TempDir()
+		lockFor(t, dir, 4242)
+		clearLockOwnedBy(dir, 4242)
+		if InUse(dir) {
+			t.Fatal("our own leftover lock should be cleared")
+		}
+	})
+}

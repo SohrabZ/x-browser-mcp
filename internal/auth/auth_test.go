@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"context"
 	"errors"
+	"github.com/SohrabZ/x-browser-mcp/internal/pool"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -306,5 +308,89 @@ func TestAbandonedLoginIsClosedAtTheDeadline(t *testing.T) {
 	// The process really exited rather than being merely forgotten.
 	if err := cmd.Process.Signal(syscall.Signal(0)); err == nil {
 		t.Error("the login process is still running after the deadline")
+	}
+}
+
+// slowReserver takes as long as a real reservation does -- long enough for a
+// second caller to arrive while the first is still getting hold of the profile.
+type slowReserver struct {
+	delay time.Duration
+	held  atomic.Int64
+}
+
+func (s *slowReserver) Reserve(ctx context.Context) (pool.Reservation, error) {
+	select {
+	case <-time.After(s.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	s.held.Add(1)
+	return &fakeReservation{}, nil
+}
+
+// A second start_login that arrives while the first is still reserving must get
+// the first window's deadline, not a window of its own. Reserving is slow, and
+// a caller that queued behind it used to wake up after the first login had
+// finished, see nothing in progress, and open a browser nobody asked for --
+// holding the profile for another full timeout.
+func TestASecondStartLoginDuringReservationJoinsTheFirst(t *testing.T) {
+	var launches atomic.Int64
+	reserver := &slowReserver{delay: 150 * time.Millisecond}
+
+	m := New(Options{
+		LoginTimeout: 4 * time.Minute,
+		Reserve:      reserver,
+		LaunchLogin: func() (*exec.Cmd, error) {
+			launches.Add(1)
+			cmd := exec.Command("sleep", "30")
+			if err := cmd.Start(); err != nil {
+				return nil, err
+			}
+			t.Cleanup(func() { _ = cmd.Process.Kill() })
+			return cmd, nil
+		},
+	})
+
+	var wg sync.WaitGroup
+	deadlines := make([]time.Time, 2)
+	errs := make([]error, 2)
+	for i := range deadlines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			deadlines[i], errs[i] = m.StartLogin(context.Background())
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d: %v", i, err)
+		}
+	}
+	if got := launches.Load(); got != 1 {
+		t.Fatalf("opened %d login windows; only one may hold the profile", got)
+	}
+	if !deadlines[0].Equal(deadlines[1]) {
+		t.Fatalf("callers got different deadlines: %s and %s", deadlines[0], deadlines[1])
+	}
+	if got := reserver.held.Load(); got != 1 {
+		t.Fatalf("took the profile %d times, want 1", got)
+	}
+}
+
+// A login that never gets off the ground must not leave status claiming one is
+// in progress forever.
+func TestAFailedStartLoginReleasesTheClaim(t *testing.T) {
+	m := New(Options{
+		LoginTimeout: time.Minute,
+		LaunchLogin:  func() (*exec.Cmd, error) { return nil, errors.New("chrome missing") },
+	})
+
+	if _, err := m.StartLogin(context.Background()); err == nil {
+		t.Fatal("expected the launch failure to surface")
+	}
+	if _, inProgress := m.loginInProgress(); inProgress {
+		t.Fatal("a login that never opened is not in progress")
 	}
 }

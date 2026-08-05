@@ -1011,3 +1011,100 @@ func (s *stubborn) Close() error {
 }
 
 func (s *stubborn) Alive(context.Context) bool { return true }
+
+// A reservation waits for the pool to go quiet so it can shut the session down
+// itself and confirm the profile is free. The idle timer must not do it first:
+// the reservation would find no session, take the profile, and hand it to a
+// login window while that Chrome was still exiting.
+//
+// The timer is driven by hand here rather than raced against -- the window is a
+// few microseconds wide in practice, and a test that waits for it would pass
+// almost every time whether or not the guard exists.
+func TestTheIdleTimerDoesNotRetireASessionAReservationIsWaitingFor(t *testing.T) {
+	open, _, made := counting()
+	p := New(open, time.Minute)
+	defer p.Close()
+
+	var mu sync.Mutex
+	var armed []func()
+	p.afterFunc = func(_ time.Duration, fn func()) *time.Timer {
+		mu.Lock()
+		armed = append(armed, fn)
+		mu.Unlock()
+		return time.AfterFunc(time.Hour, func() {}) // never fires on its own
+	}
+
+	lease, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	// Reserve while the lease is still out, so the reservation is waiting for
+	// quiet at the moment the last lease is returned.
+	reserved := make(chan Reservation, 1)
+	failed := make(chan error, 1)
+	go func() {
+		res, err := p.Reserve(context.Background())
+		if err != nil {
+			failed <- err
+			return
+		}
+		reserved <- res
+	}()
+
+	waitUntil(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.exclusive != nil
+	}, "reserve never published exclusivity")
+
+	mu.Lock()
+	before := len(armed)
+	mu.Unlock()
+
+	lease.Release()
+
+	// Returning the last lease must not arm an idle close: the reservation owns
+	// this session's shutdown now.
+	mu.Lock()
+	after := len(armed)
+	mu.Unlock()
+	if after != before {
+		t.Fatalf("the idle timer was armed while a reservation was waiting (%d new)", after-before)
+	}
+
+	select {
+	case res := <-reserved:
+		defer res.Release()
+	case err := <-failed:
+		t.Fatalf("reserve: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("reserve never completed")
+	}
+
+	// Exactly one shutdown, run by the reservation -- not one by the timer and
+	// a reservation that believed there was nothing left to close.
+	if got := len(*made); got != 1 {
+		t.Fatalf("expected one session, got %d", got)
+	}
+	if !(*made)[0].closed.Load() {
+		t.Fatal("the reservation returned without the session being closed")
+	}
+	p.mu.Lock()
+	pending := p.closing
+	p.mu.Unlock()
+	if pending != nil {
+		t.Fatal("a shutdown was still running when the profile was handed over")
+	}
+}
+
+func waitUntil(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

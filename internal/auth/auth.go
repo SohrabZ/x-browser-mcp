@@ -252,6 +252,14 @@ func signedIn(session *browser.Session, page *browser.Page) (bool, error) {
 func (m *Manager) StartLogin(ctx context.Context) (time.Time, error) {
 	m.Invalidate()
 
+	// Claim the login before doing anything slow. Reserving the profile can
+	// take as long as a read, and a second caller that arrives during it would
+	// otherwise see no login in progress, queue behind the reservation, and
+	// open its own window once this one had finished -- a browser nobody asked
+	// for, holding the profile for another full timeout. The deadline is known
+	// up front, so there is nothing to wait for before publishing it.
+	att := &attempt{deadline: m.now().Add(m.opts.LoginTimeout)}
+
 	m.mu.Lock()
 	if m.login != nil {
 		// A window is already open on this profile; a second one cannot have it.
@@ -259,7 +267,22 @@ func (m *Manager) StartLogin(ctx context.Context) (time.Time, error) {
 		m.mu.Unlock()
 		return deadline, nil
 	}
+	m.login = att
 	m.mu.Unlock()
+
+	// From here every failure has to give the claim back, or status reports a
+	// login in progress that will never finish.
+	launched := false
+	defer func() {
+		if launched {
+			return
+		}
+		m.mu.Lock()
+		if m.login == att {
+			m.login = nil
+		}
+		m.mu.Unlock()
+	}()
 
 	// Take the profile before opening the window, and keep it until the window
 	// closes. Releasing it early would let the next read start a second Chrome
@@ -275,21 +298,6 @@ func (m *Manager) StartLogin(ctx context.Context) (time.Time, error) {
 		reservation = got
 	}
 
-	// Recheck under the reservation. Two callers can both pass the check above,
-	// and reserving is slow enough for the first to have opened its window in
-	// the meantime -- launching a second onto the same profile would break the
-	// contract of this method and the single-owner invariant with it.
-	m.mu.Lock()
-	if m.login != nil {
-		deadline := m.login.deadline
-		m.mu.Unlock()
-		if reservation != nil {
-			reservation.Release()
-		}
-		return deadline, nil
-	}
-	m.mu.Unlock()
-
 	cmd, err := m.opts.LaunchLogin()
 	if err != nil {
 		if reservation != nil {
@@ -298,16 +306,12 @@ func (m *Manager) StartLogin(ctx context.Context) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("open login browser: %w", err)
 	}
 
-	att := &attempt{
-		cmd:      cmd,
-		done:     waitFor(cmd),
-		deadline: m.now().Add(m.opts.LoginTimeout),
-		profile:  reservation,
-	}
-
 	m.mu.Lock()
-	m.login = att
+	att.cmd = cmd
+	att.done = waitFor(cmd)
+	att.profile = reservation
 	m.mu.Unlock()
+	launched = true
 
 	go m.watch(att)
 	return att.deadline, nil

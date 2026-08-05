@@ -509,6 +509,13 @@ func (p *Pool) armIdleTimerLocked() {
 	if p.closed {
 		return
 	}
+	// A reservation is waiting for the pool to go quiet so it can shut the
+	// session down itself. Retiring it from here would start that shutdown
+	// behind the reservation's back: it would see no session, take the profile,
+	// and hand it to a login window while the old Chrome was still exiting.
+	if p.exclusive != nil {
+		return
+	}
 	if p.idle <= 0 {
 		// Warming disabled: retire the browser, but track the shutdown so the
 		// next read does not start a replacement while this one still holds the
