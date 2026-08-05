@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,8 +17,6 @@ import (
 
 	"github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
-	"net/http"
-	"net/http/httptest"
 )
 
 func flagsOf(t *testing.T, opts Options) string {
@@ -544,6 +544,13 @@ func TestCleanupLeavesAnUnattributableLockAlone(t *testing.T) {
 // such a hook on its composer, so a write that had just posted left the browser
 // parked behind a modal, still holding the profile.
 func TestClosingATabDoesNotWaitOnABeforeUnloadPrompt(t *testing.T) {
+	// Headless Chrome dismisses these dialogs by itself, so a headless run would
+	// pass whether or not the bug is present. Writes use a visible browser, which
+	// is where the modal actually appeared, so this needs one -- and a visible
+	// browser needs a display, which CI does not have.
+	if os.Getenv("XBM_HEADED_TESTS") == "" {
+		t.Skip("set XBM_HEADED_TESTS=1 to run; needs a visible browser")
+	}
 	chrome := ChromePathForTest()
 	if chrome == "" {
 		t.Skip("no Chrome installed")
@@ -561,14 +568,6 @@ func TestClosingATabDoesNotWaitOnABeforeUnloadPrompt(t *testing.T) {
 		</script></body></html>`))
 	}))
 	defer srv.Close()
-
-	// Headless Chrome dismisses these dialogs by itself, so a headless run
-	// would pass whether or not the bug is present. Writes use a visible
-	// browser, which is where the modal actually appeared, so this needs one --
-	// and a visible browser needs a display, which CI does not have.
-	if os.Getenv("XBM_HEADED_TESTS") == "" {
-		t.Skip("set XBM_HEADED_TESTS=1 to run; needs a visible browser")
-	}
 
 	session, err := Open(context.Background(), Options{ChromePath: chrome, Headless: false})
 	if err != nil {

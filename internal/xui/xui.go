@@ -106,7 +106,46 @@ const (
 	SelUnrepostButton = `[data-testid="unretweet"]`
 	SelBookmarkAdd    = `[data-testid="bookmark"]`
 	SelBookmarkRemove = `[data-testid="removeBookmark"]`
+
+	// SelPost is the article X wraps around a single post, and the unit the
+	// engagement controls above belong to. See ControlScript.
+	SelPost = `article[data-testid="tweet"]`
 )
+
+// ControlScript finds one post's engagement control and, when asked to, presses
+// it. It takes a post id, a selector and a flag, and returns "ok", "no-control"
+// if the post is there without the control, or "no-post" if X has not rendered
+// any post yet.
+//
+// A permalink page is not one post. X renders the post's ancestors above it, its
+// replies below, and any quoted post inside it, and gives every one of them its
+// own reply, repost, like and bookmark row. A selector matched against the
+// document therefore finds whichever of those comes first, so one reply the
+// viewer had already liked was enough for a like to report success without ever
+// touching the post that was asked for.
+//
+// The post wanted is the article that links to its own status id. X leaves that
+// link off the post you are already looking at, so an article claiming the id is
+// preferred and the first article is the fallback -- which is the post itself on
+// a top-level permalink, and is what an unscoped selector would have found.
+//
+// The press is a DOM click rather than a synthesized mouse event, because X
+// ignores those on these controls: the page accepts the event, reports nothing
+// wrong, and makes no request.
+const ControlScript = `(postID, selector, press) => {
+  const posts = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+  if (posts.length === 0) return 'no-post';
+
+  const owns = post => Array.from(post.querySelectorAll('a[href*="/status/"]')).some(link => {
+    const m = /\/status\/(\d+)/.exec(link.getAttribute('href') || '');
+    return m !== null && m[1] === postID;
+  });
+
+  const control = (posts.find(owns) || posts[0]).querySelector(selector);
+  if (control === null) return 'no-control';
+  if (press) control.click();
+  return 'ok';
+}`
 
 // SignedInCookies reports whether the browser holds the pair of cookies X sets
 // for an authenticated session.

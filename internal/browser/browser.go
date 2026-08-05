@@ -405,7 +405,13 @@ func (p *Page) Close() {
 		// Fall back to the page-level close, which may prompt but is better
 		// than leaving the tab open.
 		_ = target.Close()
+		return
 	}
+	// rod caches a page against its target and drops it in its own Close, which
+	// this path goes around. A pooled browser opens a tab per read and lives as
+	// long as the process, so leaving the entry behind grows that cache for
+	// every read the process ever serves.
+	target.Browser().RemoveState(target.TargetID)
 }
 
 func isTargetLost(err error) bool {
