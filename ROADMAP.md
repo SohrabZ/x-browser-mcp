@@ -15,29 +15,12 @@ startup, paced like a person, and recorded in an append-only audit log.
 
 **Interfaces** — MCP over streamable HTTP, plus a REST API.
 
+**A warm browser** — reads share one Chrome instead of launching and quitting
+per request, which cut the median uncached read from 3.58s to 2.02s. It is
+released automatically before an interactive login or a write, since only one
+Chrome may hold the profile, and closed after `-browser-idle` with no reads.
+
 ## Next
-
-### Keep a browser warm
-
-The largest available speedup. Every uncached read currently launches Chrome,
-loads a page, waits for render, and quits. Measured on a real read:
-
-| Step | Cold | Warm |
-| --- | --- | --- |
-| Chrome launch | 0.83s | — |
-| Page load | 2.18s | 0.38s |
-| Wait + extract | 0.52s | 0.94s |
-| Close | 1.00s | — |
-| **Total** | **4.53s** | **1.32s** |
-
-Reusing a browser skips launch and close outright and loads pages roughly five
-times faster through connection and cache reuse — about 3.2s per read.
-
-The complication is the profile lock: only one Chrome may hold a profile, so a
-warm browser must be released before `start_login` opens its window, and
-reclaimed afterwards. It also needs an idle timeout, since an idle Chrome holds
-memory and a browser that lives for days is a larger surface than one that
-lives for seconds.
 
 ### Make caching configurable
 

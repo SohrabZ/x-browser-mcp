@@ -34,8 +34,16 @@ type Status struct {
 	ProfileDir string    `json:"profile_dir"`
 }
 
-// Opener starts a browser session against the persistent profile.
-type Opener func(ctx context.Context, headless bool) (*browser.Session, error)
+// Lease borrows a browser session and returns a function that hands it back.
+type Lease func(ctx context.Context) (*browser.Session, func(), error)
+
+// Evictor releases the shared browser so something else can take the profile.
+//
+// Only one Chrome may hold a user-data-dir, so the interactive login window
+// cannot open while a warm browser is still holding it.
+type Evictor interface {
+	Evict(ctx context.Context) error
+}
 
 // LoginLauncher opens a visible browser for the user to sign in with. It
 // returns the running process so its exit can be observed.
@@ -47,7 +55,8 @@ type Options struct {
 	StatusTTL    time.Duration
 	LoginTimeout time.Duration
 
-	Open        Opener
+	Lease       Lease
+	Evict       Evictor
 	LaunchLogin LoginLauncher
 }
 
@@ -171,7 +180,7 @@ func (m *Manager) probe(ctx context.Context) (Status, error) {
 		ProfileDir: m.opts.ProfileDir,
 	}
 
-	session, err := m.opts.Open(ctx, true)
+	session, release, err := m.opts.Lease(ctx)
 	if err != nil {
 		// A locked profile means someone else is using it, not that the session
 		// is gone; reporting "login required" would send the user into a
@@ -181,7 +190,7 @@ func (m *Manager) probe(ctx context.Context) (Status, error) {
 		}
 		return Status{}, err
 	}
-	defer session.Close()
+	defer release()
 
 	page, err := session.Page()
 	if err != nil {
@@ -238,6 +247,16 @@ func (m *Manager) StartLogin(ctx context.Context) (time.Time, error) {
 		return deadline, nil
 	}
 	m.mu.Unlock()
+
+	// The login window needs the profile, which a warm browser is holding.
+	if m.opts.Evict != nil {
+		evictCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := m.opts.Evict.Evict(evictCtx)
+		cancel()
+		if err != nil {
+			return time.Time{}, fmt.Errorf("release browser for login: %w", err)
+		}
+	}
 
 	cmd, err := m.opts.LaunchLogin()
 	if err != nil {

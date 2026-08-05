@@ -34,6 +34,11 @@ const (
 // Opener starts a browser session against the persistent profile.
 type Opener func(ctx context.Context, headless bool) (*browser.Session, error)
 
+// Evictor releases the shared browser so a write can take the profile.
+type Evictor interface {
+	Evict(ctx context.Context) error
+}
+
 // Writer performs mutating actions.
 type Writer struct {
 	open    Opener
@@ -41,6 +46,7 @@ type Writer struct {
 	gate    *Gate
 	budget  *limit.Budget
 	audit   *Auditor
+	evict   Evictor
 	timeout time.Duration
 
 	// onChange lets the reader drop cached results after a successful write.
@@ -54,6 +60,7 @@ type Options struct {
 	Gate     *Gate
 	Budget   *limit.Budget
 	Audit    *Auditor
+	Evict    Evictor
 	Timeout  time.Duration
 	OnChange func()
 }
@@ -66,6 +73,7 @@ func New(opts Options) *Writer {
 		gate:     opts.Gate,
 		budget:   opts.Budget,
 		audit:    opts.Audit,
+		evict:    opts.Evict,
 		timeout:  opts.Timeout,
 		onChange: opts.OnChange,
 	}
@@ -178,6 +186,14 @@ func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func
 
 	ctx, cancel := context.WithTimeout(ctx, w.timeout)
 	defer cancel()
+
+	// A write needs its own visible browser, and only one Chrome may hold the
+	// profile, so the warm reader browser has to be handed back first.
+	if w.evict != nil {
+		if err := w.evict.Evict(ctx); err != nil {
+			return w.fail(rec, err)
+		}
+	}
 
 	// Writes run in a visible browser: X guards its compose and engagement
 	// controls more aggressively than its timelines, and a headless window is

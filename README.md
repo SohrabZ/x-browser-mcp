@@ -257,6 +257,7 @@ act as you.
 | `-allow-writes`   | `false`             | enable write tools                   |
 | `-fetch-timeout`  | `45s`               | budget for one read                  |
 | `-login-timeout`  | `5m`                | how long a login window stays open   |
+| `-browser-idle`   | `3m`                | how long a browser stays warm (0 = off) |
 | `-read-interval`  | `3s`                | minimum gap between live reads       |
 | `-read-window`    | `10m`               | rolling window for the read budget   |
 | `-read-max`       | `30`                | maximum live reads per window        |
@@ -269,8 +270,9 @@ act as you.
 
 ## Notes
 
-- The first read after an idle period takes 10–20 seconds; it cold-starts
-  Chrome. Later reads are cached.
+- Reads share a warm browser, so the first read after an idle period pays the
+  Chrome start and later ones do not. Repeated identical reads are cached and
+  return instantly.
 - Reads are paced (3s apart, 30 per 10 minutes) and cached reads cost nothing.
   Driving a browser at X too eagerly is what gets sessions flagged.
 - Writes are paced to look like a person, not an agent: at least 45s apart plus
