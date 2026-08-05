@@ -76,6 +76,15 @@ type Pool struct {
 	// on it rather than launching their own.
 	opening chan struct{}
 
+	// closing is non-nil while a discarded browser is still shutting down.
+	//
+	// Chrome holds the profile lock until it has actually exited, so starting a
+	// replacement before the old one finishes puts two processes on the
+	// directory -- the failure the whole package exists to prevent. Closing is
+	// slow enough (about a second) that it cannot block the caller, so it is
+	// tracked instead.
+	closing chan struct{}
+
 	// exclusive is non-nil while the profile is reserved outside the pool. It
 	// is closed on release, which is what waiting acquires block on.
 	exclusive chan struct{}
@@ -98,6 +107,37 @@ func New(open Opener, idle time.Duration) *Pool {
 	}
 	p.drained = sync.NewCond(&p.mu)
 	return p
+}
+
+// quietLocked reports that nothing holds or is about to hold the profile: no
+// outstanding leases, no launch in flight, no close still finishing.
+//
+// Leases alone are not enough. A caller that has published p.opening holds no
+// lease yet but is about to own a browser, and a discarded Chrome keeps the
+// profile lock until its process exits.
+func (p *Pool) quietLocked() bool {
+	return p.leases == 0 && p.opening == nil && p.closing == nil
+}
+
+// beginCloseLocked retires a session, tracking the shutdown so nothing opens a
+// replacement while the old Chrome still holds the profile.
+func (p *Pool) beginCloseLocked(s Session) {
+	if s == nil {
+		return
+	}
+	done := make(chan struct{})
+	p.closing = done
+
+	go func() {
+		s.Close()
+		p.mu.Lock()
+		if p.closing == done {
+			p.closing = nil
+		}
+		p.drained.Broadcast()
+		p.mu.Unlock()
+		close(done)
+	}()
 }
 
 // Lease is a borrowed session. Release must be called exactly once.
@@ -140,11 +180,25 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 			continue
 		}
 
+		// A retiring browser still owns the profile until it exits.
+		if wait := p.closing; wait != nil {
+			p.mu.Unlock()
+			if err := waitFor(ctx, wait); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
 		// A pooled browser can die without the pool being told -- a crash, an
 		// OOM kill, or the user quitting it -- and then fails every call.
-		var dead Session
+		// Alive cannot distinguish death from a transient fault, so the old
+		// process is retired properly rather than abandoned.
 		if p.session != nil && !alive(p.session) {
-			dead, p.session = p.session, nil
+			dead := p.session
+			p.session = nil
+			p.beginCloseLocked(dead)
+			p.mu.Unlock()
+			continue
 		}
 
 		if p.session != nil {
@@ -152,14 +206,12 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 			p.leases++
 			session := p.session
 			p.mu.Unlock()
-			closeAsync(dead)
 			return &Lease{Session: session, pool: p}, nil
 		}
 
 		// Someone else is already launching; take their result.
 		if wait := p.opening; wait != nil {
 			p.mu.Unlock()
-			closeAsync(dead)
 			if err := waitFor(ctx, wait); err != nil {
 				return nil, err
 			}
@@ -171,28 +223,36 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 		done := make(chan struct{})
 		p.opening = done
 		p.mu.Unlock()
-		closeAsync(dead)
 
 		session, err := p.open(ctx)
 
 		p.mu.Lock()
 		p.opening = nil
 		close(done)
+		// A reservation may be waiting on this launch to finish.
+		p.drained.Broadcast()
 
 		switch {
 		case err != nil:
 			p.mu.Unlock()
 			return nil, err
 		case p.closed:
+			p.beginCloseLocked(session)
 			p.mu.Unlock()
-			session.Close()
 			return nil, ErrClosed
 		case p.exclusive != nil:
-			// The profile was reserved while this was launching. Give it up and
-			// wait like everyone else.
+			// Reserved while this was launching. Retire it and wait like
+			// everyone else; the reservation waits for that close to finish.
+			p.beginCloseLocked(session)
 			p.mu.Unlock()
-			session.Close()
 			continue
+		case ctx.Err() != nil:
+			// The caller gave up mid-launch. The browser is fine, so keep it
+			// warm for the next read rather than discarding a good launch.
+			p.session = session
+			p.armIdleTimerLocked()
+			p.mu.Unlock()
+			return nil, ctx.Err()
 		default:
 			p.session = session
 			p.stopIdleTimerLocked()
@@ -232,11 +292,13 @@ func (p *Pool) Reserve(ctx context.Context) (Reservation, error) {
 	p.stopIdleTimerLocked()
 	p.mu.Unlock()
 
-	// With acquires blocked, the lease count can only fall.
+	// With acquires blocked, wait for the profile to go quiet. Leases alone are
+	// not enough: a caller may already be launching a browser without holding
+	// one, and a retiring Chrome keeps the profile lock until it exits.
 	drained := make(chan struct{})
 	go func() {
 		p.mu.Lock()
-		for p.leases > 0 && !p.closed {
+		for !p.quietLocked() && !p.closed {
 			p.drained.Wait()
 		}
 		p.mu.Unlock()
@@ -250,6 +312,8 @@ func (p *Pool) Reserve(ctx context.Context) (Reservation, error) {
 	case <-drained:
 	}
 
+	// Close synchronously: the caller is about to put its own Chrome on this
+	// profile and cannot do that until ours has actually let go.
 	p.mu.Lock()
 	session := p.session
 	p.session = nil
@@ -326,10 +390,12 @@ func (p *Pool) armIdleTimerLocked() {
 		return
 	}
 	if p.idle <= 0 {
-		// Warming disabled: close rather than hold the profile.
+		// Warming disabled: retire the browser, but track the shutdown so the
+		// next read does not start a replacement while this one still holds the
+		// profile.
 		session := p.session
 		p.session = nil
-		closeAsync(session)
+		p.beginCloseLocked(session)
 		return
 	}
 	if p.session == nil {
@@ -354,11 +420,8 @@ func (p *Pool) armIdleTimerLocked() {
 		session := p.session
 		p.session = nil
 		p.idleStop = nil
+		p.beginCloseLocked(session)
 		p.mu.Unlock()
-
-		if session != nil {
-			session.Close()
-		}
 	})
 }
 
@@ -376,13 +439,5 @@ func waitFor(ctx context.Context, ch <-chan struct{}) error {
 		return ctx.Err()
 	case <-ch:
 		return nil
-	}
-}
-
-// closeAsync closes a discarded session without making the caller wait; quitting
-// Chrome takes about a second.
-func closeAsync(s Session) {
-	if s != nil {
-		go s.Close()
 	}
 }

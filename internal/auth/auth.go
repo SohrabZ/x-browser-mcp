@@ -274,6 +274,21 @@ func (m *Manager) StartLogin(ctx context.Context) (time.Time, error) {
 		reservation = got
 	}
 
+	// Recheck under the reservation. Two callers can both pass the check above,
+	// and reserving is slow enough for the first to have opened its window in
+	// the meantime -- launching a second onto the same profile would break the
+	// contract of this method and the single-owner invariant with it.
+	m.mu.Lock()
+	if m.login != nil {
+		deadline := m.login.deadline
+		m.mu.Unlock()
+		if reservation != nil {
+			reservation.Release()
+		}
+		return deadline, nil
+	}
+	m.mu.Unlock()
+
 	cmd, err := m.opts.LaunchLogin()
 	if err != nil {
 		if reservation != nil {

@@ -9,13 +9,15 @@ import (
 	"time"
 )
 
-// fakeSession records whether it was closed.
+// fakeSession records whether it was closed, and can report itself dead.
 type fakeSession struct {
 	id     int
 	closed atomic.Bool
+	dead   atomic.Bool
 }
 
-func (f *fakeSession) Close() { f.closed.Store(true) }
+func (f *fakeSession) Close()      { f.closed.Store(true) }
+func (f *fakeSession) Alive() bool { return !f.dead.Load() }
 
 // counting returns an opener that hands out numbered sessions and counts how
 // many browsers were launched -- the number this whole package exists to reduce.
@@ -450,18 +452,13 @@ func TestDoubleReleaseIsSafe(t *testing.T) {
 	}
 }
 
-// deadSession reports itself unusable, as a session does once its browser has
-// crashed, been killed, or been quit by the user.
-type deadSession struct{ fakeSession }
-
-func (d *deadSession) Alive() bool { return false }
-
 // A browser that dies underneath the pool must be replaced, not handed out
 // again. Reusing it fails every call, and nothing recovers until the idle timer
 // happens to fire.
 func TestDeadSessionIsReplaced(t *testing.T) {
 	var launches atomic.Int64
-	first := &deadSession{}
+	first := &fakeSession{}
+	first.dead.Store(true)
 
 	p := New(func(context.Context) (Session, error) {
 		if launches.Add(1) == 1 {
@@ -516,4 +513,158 @@ func TestSessionWithoutLivenessCheckIsReused(t *testing.T) {
 	if got := launches.Load(); got != 1 {
 		t.Fatalf("expected reuse, got %d launches", got)
 	}
+}
+
+// blockingSession lets a test hold Close open, standing in for a Chrome that
+// has not finished exiting and so still holds the profile lock.
+type blockingSession struct {
+	fakeSession
+	closeGate chan struct{}
+}
+
+func (b *blockingSession) Close() {
+	if b.closeGate != nil {
+		<-b.closeGate
+	}
+	b.fakeSession.Close()
+}
+
+// A caller that has claimed the launch holds no lease yet, but is about to own
+// a browser. A reservation that only waited for leases would return while that
+// Chrome was still starting, and the login or write would put a second one on
+// the same profile.
+func TestReserveWaitsForAnInFlightLaunch(t *testing.T) {
+	launching := make(chan struct{})
+	finish := make(chan struct{})
+
+	p := New(func(context.Context) (Session, error) {
+		close(launching)
+		<-finish // still starting Chrome
+		return &fakeSession{}, nil
+	}, time.Minute)
+	defer p.Close()
+
+	go func() {
+		l, err := p.Acquire(context.Background())
+		if err == nil {
+			l.Release()
+		}
+	}()
+	<-launching
+
+	reserved := make(chan struct{})
+	go func() {
+		res, err := p.Reserve(context.Background())
+		if err == nil {
+			res.Release()
+		}
+		close(reserved)
+	}()
+
+	select {
+	case <-reserved:
+		t.Fatal("reserve completed while a browser was still launching")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(finish)
+
+	select {
+	case <-reserved:
+	case <-time.After(3 * time.Second):
+		t.Fatal("reserve never completed after the launch finished")
+	}
+}
+
+// Chrome keeps the profile lock until it has actually exited, so a replacement
+// must not start while the old one is still shutting down.
+func TestReplacementWaitsForTheOldBrowserToExit(t *testing.T) {
+	gate := make(chan struct{})
+	dying := &blockingSession{closeGate: gate}
+	dying.dead.Store(true)
+
+	var opens atomic.Int64
+	var openedWhileClosing atomic.Bool
+
+	p := New(func(context.Context) (Session, error) {
+		if opens.Add(1) > 1 && !dying.fakeSession.closed.Load() {
+			openedWhileClosing.Store(true)
+		}
+		return &fakeSession{}, nil
+	}, time.Minute)
+	defer p.Close()
+
+	// Seed the pool with the dying session.
+	p.mu.Lock()
+	p.session = dying
+	p.mu.Unlock()
+
+	got := make(chan struct{})
+	go func() {
+		l, err := p.Acquire(context.Background())
+		if err == nil {
+			l.Release()
+		}
+		close(got)
+	}()
+
+	select {
+	case <-got:
+		t.Fatal("a replacement was acquired before the old browser exited")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(gate) // the old Chrome finally exits
+
+	select {
+	case <-got:
+	case <-time.After(3 * time.Second):
+		t.Fatal("acquire never completed after the old browser exited")
+	}
+	if openedWhileClosing.Load() {
+		t.Fatal("a replacement browser started while the old one still held the profile")
+	}
+}
+
+// With warming disabled the browser is retired on every release, and the next
+// read must still wait for that shutdown rather than racing it.
+func TestZeroIdleBackToBackAcquiresDoNotOverlap(t *testing.T) {
+	var live, peak atomic.Int64
+
+	p := New(func(context.Context) (Session, error) {
+		n := live.Add(1)
+		for {
+			old := peak.Load()
+			if n <= old || peak.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		return &countedSession{live: &live}, nil
+	}, 0)
+	defer p.Close()
+
+	for i := 0; i < 5; i++ {
+		l, err := p.Acquire(t.Context())
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		l.Release()
+	}
+
+	if got := peak.Load(); got > 1 {
+		t.Fatalf("%d browsers held the profile at once with warming disabled", got)
+	}
+}
+
+// countedSession decrements the live counter only once Close has finished, the
+// way Chrome releases the profile only once it has exited.
+type countedSession struct {
+	fakeSession
+	live *atomic.Int64
+}
+
+func (c *countedSession) Close() {
+	time.Sleep(10 * time.Millisecond) // shutting down
+	c.live.Add(-1)
+	c.fakeSession.Close()
 }
