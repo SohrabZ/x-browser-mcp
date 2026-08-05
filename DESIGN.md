@@ -8,8 +8,8 @@ so the structure can be reviewed independently of the code.
 - Read X from a real logged-in Chrome profile, no official API.
 - Extend beyond home timeline and search to per-user timelines, threads, lists
   and bookmarks.
-- Support write actions (post, reply, like, repost, bookmark) behind explicit,
-  hard-to-bypass gating.
+- Support write actions (post, reply, like, repost, bookmark, and removing a
+  bookmark) behind explicit, hard-to-bypass gating.
 - Small packages with one responsibility each, so browser-dependent code stays
   isolated from logic that can be unit tested.
 

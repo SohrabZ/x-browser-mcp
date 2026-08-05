@@ -41,7 +41,7 @@ func run() error {
 	flag.StringVar(&cfg.ChromePath, "chrome", cfg.ChromePath, "path to the Chrome binary")
 	flag.StringVar(&cfg.ProfileName, "profile", cfg.ProfileName, "Chrome profile directory inside the profile dir")
 	flag.BoolVar(&cfg.Headless, "headless", cfg.Headless, "run read browsers headless")
-	flag.BoolVar(&cfg.AllowWrites, "allow-writes", cfg.AllowWrites, "enable the write tools (post, reply, like, repost, bookmark)")
+	flag.BoolVar(&cfg.AllowWrites, "allow-writes", cfg.AllowWrites, "enable the write tools (post, reply, like, repost, bookmark, unbookmark)")
 	flag.DurationVar(&cfg.FetchTimeout, "fetch-timeout", cfg.FetchTimeout, "time budget for a single read")
 	flag.DurationVar(&cfg.LoginTimeout, "login-timeout", cfg.LoginTimeout, "how long an interactive login may stay open")
 	flag.DurationVar(&cfg.WriteTimeout, "write-timeout", cfg.WriteTimeout, "time budget for a single write, including confirming it took effect")
@@ -146,6 +146,7 @@ func run() error {
 	handler := httpapi.Handler(httpapi.Deps{
 		Auth:   authManager,
 		Reader: reader,
+		Writer: writer,
 		MCP:    mcpapi.Server(mcpapi.Deps{Auth: authManager, Reader: reader, Writer: writer}),
 		Log:    log,
 	})

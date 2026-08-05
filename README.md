@@ -201,6 +201,22 @@ POST /api/v1/search      {"query":"...","mode":"latest","limit":5}
 POST /mcp
 ```
 
+With `-allow-writes`, and not registered at all without it:
+
+```
+POST /api/v1/post        {"text":"...","confirm":"..."}
+POST /api/v1/reply       {"handle":"...","post_id":"...","text":"...","confirm":"..."}
+POST /api/v1/like        {"handle":"...","post_id":"...","confirm":"..."}
+POST /api/v1/repost      {"handle":"...","post_id":"...","confirm":"..."}
+POST /api/v1/bookmark    {"handle":"...","post_id":"...","confirm":"..."}
+POST /api/v1/unbookmark  {"handle":"...","post_id":"...","confirm":"..."}
+```
+
+A write answers `{"ok":true,"action":"like"}`, or an `error` saying what went
+wrong: `403` if the token is wrong, `400` if the request is, `412` if the session
+needs a sign-in, `429` if the write budget is spent, and `502` if the action was
+attempted and X did not apply it.
+
 ## Writing
 
 Write actions are **disabled unless you pass `-allow-writes`**, and when
