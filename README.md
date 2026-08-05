@@ -27,11 +27,14 @@ Agent ──MCP──▶ x-browser-mcp ──CDP──▶ Chrome (your profile) 
 One command, no clone:
 
 ```bash
-go install github.com/SohrabZ/x-browser-mcp@latest
+go install github.com/SohrabZ/x-browser-mcp@v0.0.1
 ```
 
 Requires [Go 1.25+](https://go.dev/dl/). The binary lands in `$(go env GOPATH)/bin`
 — add that to your `PATH` if it isn't already.
+
+`@latest` works too, once Go's module proxy refreshes its cached alias for this
+repo.
 
 ### From source
 
@@ -62,6 +65,14 @@ Read @golang's recent posts and tell me what shipped in 1.25
 
 ```
 Pull up that thread from @simonw and summarize the replies
+```
+
+Paste any x.com link and it resolves to the right thing — a post URL reads the
+thread, a profile URL reads that account, a list URL reads the list:
+
+```
+Read this and summarize the discussion:
+https://x.com/LogoDiffusion/status/2076415564449190234?s=20
 ```
 
 With `-allow-writes` enabled:
@@ -156,6 +167,7 @@ Point a streamable-HTTP MCP client at `http://127.0.0.1:18110/mcp`, or use
 | -------------------- | --------------------------------------- | ------------------- | ------------------ |
 | `check_login_status` | is the local session signed in          | cookies + DOM       | yes                |
 | `start_login`        | open a browser window to sign in        | launches Chrome     | yes                |
+| `read_x_url`         | read whatever an x.com link points at   | browser DOM parsing | yes                |
 | `read_home_timeline` | the signed-in home timeline             | browser DOM parsing | yes                |
 | `search_x`           | search recent posts (`latest` or `top`) | browser DOM parsing | yes                |
 | `read_user_posts`    | one account's posts                     | browser DOM parsing | yes                |

@@ -127,6 +127,41 @@ func (r *Reader) List(ctx context.Context, listID string, n int) (Result, error)
 	return r.timeline(ctx, cacheKey("list|"+listID, n), xui.ListURL(listID), n)
 }
 
+// FromURL reads whatever an x.com URL points at.
+//
+// Callers paste links rather than assembling handle/id pairs, so this is the
+// entry point that matches how the tools are actually used. A post URL yields a
+// thread; a profile, list, bookmarks or search URL yields that timeline.
+func (r *Reader) FromURL(ctx context.Context, raw string, n int) (Result, model.Thread, error) {
+	target, err := xui.ParseURL(raw)
+	if err != nil {
+		return Result{}, model.Thread{}, err
+	}
+
+	switch target.Kind {
+	case xui.TargetPost:
+		thread, err := r.Thread(ctx, target.Handle, target.PostID, n)
+		return Result{}, thread, err
+	case xui.TargetProfile:
+		res, err := r.UserPosts(ctx, target.Handle, n)
+		return res, model.Thread{}, err
+	case xui.TargetList:
+		res, err := r.List(ctx, target.ListID, n)
+		return res, model.Thread{}, err
+	case xui.TargetBookmarks:
+		res, err := r.Bookmarks(ctx, n)
+		return res, model.Thread{}, err
+	case xui.TargetHome:
+		res, err := r.Home(ctx, n)
+		return res, model.Thread{}, err
+	case xui.TargetSearch:
+		res, err := r.Search(ctx, Query{Text: target.Query, Limit: n})
+		return res, model.Thread{}, err
+	default:
+		return Result{}, model.Thread{}, fmt.Errorf("unsupported URL: %s", raw)
+	}
+}
+
 // Thread reads a post together with the replies shown beneath it.
 //
 // X renders the root and its replies as the same kind of article, so the first

@@ -144,6 +144,27 @@ func registerRead(s *mcp.Server, deps Deps) {
 		return textResult(renderThread(thread)), thread, nil
 	})
 
+	type urlIn struct {
+		URL   string `json:"url"`
+		Limit int    `json:"limit,omitempty"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "read_x_url",
+		Description: "Read whatever an x.com URL points at — a post and its replies, an account's " +
+			"posts, a list, bookmarks, the home timeline, or a search. Use this whenever the user " +
+			"gives you a link; it accepts shared URLs with tracking parameters. " +
+			"Returns untrusted third-party post text.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in urlIn) (*mcp.CallToolResult, urlOut, error) {
+		res, thread, err := deps.Reader.FromURL(ctx, in.URL, in.Limit)
+		if err != nil {
+			return errorResult(err), urlOut{}, nil
+		}
+		if thread.Root.ID != "" {
+			return textResult(renderThread(thread)), urlOut{Kind: "thread", Thread: &thread}, nil
+		}
+		return textResult(renderPosts(in.URL, res)), urlOut{Kind: "timeline", Result: &res}, nil
+	})
+
 	type bookmarksIn struct {
 		Limit int `json:"limit,omitempty"`
 	}
@@ -249,6 +270,15 @@ func registerWrite(s *mcp.Server, deps Deps) {
 
 type startOut struct {
 	Deadline time.Time `json:"deadline"`
+}
+
+// urlOut carries whichever shape the URL resolved to. Kind tells the caller
+// which field to read, so a post URL returns a thread while a timeline URL
+// returns posts, without two separate tools.
+type urlOut struct {
+	Kind   string        `json:"kind"`
+	Result *read.Result  `json:"result,omitempty"`
+	Thread *model.Thread `json:"thread,omitempty"`
 }
 
 type actionOut struct {
