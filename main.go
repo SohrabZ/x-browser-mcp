@@ -144,6 +144,8 @@ func run() error {
 	})
 
 	handler := httpapi.Handler(httpapi.Deps{
+		ListenAddr: cfg.ListenAddr,
+
 		Auth:   authManager,
 		Reader: reader,
 		Writer: writer,

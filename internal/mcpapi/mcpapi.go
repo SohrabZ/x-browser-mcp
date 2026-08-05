@@ -45,17 +45,26 @@ func Server(deps Deps) *mcp.Server {
 
 // version is what the server tells clients it is.
 //
-// Read from the build rather than written down, because a hardcoded one goes
-// stale the moment a tag is cut and nothing fails when it does -- this said
-// 0.0.4 for three releases. A build with no version stamp, which is what `go
-// build` from a checkout produces, reports itself as such.
-func version() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok || info.Main.Version == "" || info.Main.Version == "(devel)" {
-		return "dev"
+// Read from the build rather than written down, because a written-down one goes
+// stale the moment a tag is cut and nothing fails when it does.
+func version() string { return versionFrom(debug.ReadBuildInfo()) }
+
+// versionFrom interprets what the build says, split out so the cases can be
+// tested: reading the real build info only ever exercises one of them.
+//
+// Installing at a tag stamps that tag. A test binary and an unstamped build
+// report nothing usable, and say so instead. A checkout that Go can resolve
+// against VCS may carry a tag or a pseudo-version, which is passed through as it
+// is -- it describes the build accurately either way.
+func versionFrom(info *debug.BuildInfo, ok bool) string {
+	if !ok || info == nil || info.Main.Version == "" || info.Main.Version == "(devel)" {
+		return devVersion
 	}
 	return strings.TrimPrefix(info.Main.Version, "v")
 }
+
+// devVersion is what a build with no usable version stamp calls itself.
+const devVersion = "dev"
 
 // untrustedNotice prefixes every batch of post text handed back to a model.
 //

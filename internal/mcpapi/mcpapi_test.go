@@ -2,8 +2,10 @@ package mcpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -354,19 +356,20 @@ func TestEachWriteToolCallsItsOwnAction(t *testing.T) {
 	post := map[string]any{"handle": "someone", "post_id": "222", "confirm": "tok"}
 
 	cases := []struct {
-		tool string
-		args map[string]any
-		want string
-		says string
+		tool   string
+		args   map[string]any
+		want   string
+		says   string
+		action string
 	}{
 		{"post_to_x", map[string]any{"text": "hello", "confirm": "tok"},
-			`post text="hello" confirm="tok"`, "Posted."},
+			`post text="hello" confirm="tok"`, "Posted.", write.ActionPost},
 		{"reply_to_post", map[string]any{"handle": "someone", "post_id": "222", "text": "hi", "confirm": "tok"},
-			`reply someone/222 text="hi" confirm="tok"`, "Replied."},
-		{"like_post", post, `like someone/222 confirm="tok"`, "Liked."},
-		{"repost_post", post, `repost someone/222 confirm="tok"`, "Reposted."},
-		{"bookmark_post", post, `bookmark someone/222 confirm="tok"`, "Bookmarked."},
-		{"unbookmark_post", post, `unbookmark someone/222 confirm="tok"`, "Removed from bookmarks."},
+			`reply someone/222 text="hi" confirm="tok"`, "Replied.", write.ActionReply},
+		{"like_post", post, `like someone/222 confirm="tok"`, "Liked.", write.ActionLike},
+		{"repost_post", post, `repost someone/222 confirm="tok"`, "Reposted.", write.ActionRepost},
+		{"bookmark_post", post, `bookmark someone/222 confirm="tok"`, "Bookmarked.", write.ActionBookmark},
+		{"unbookmark_post", post, `unbookmark someone/222 confirm="tok"`, "Removed from bookmarks.", write.ActionUnbookmark},
 	}
 
 	for _, c := range cases {
@@ -383,6 +386,24 @@ func TestEachWriteToolCallsItsOwnAction(t *testing.T) {
 		}
 		if got := textOf(t, res); got != c.says {
 			t.Errorf("%s said %q, want %q", c.tool, got, c.says)
+		}
+		// The structured half is what a client reads programmatically, and it
+		// carries the action name into the caller's own records.
+		var out struct {
+			OK     bool   `json:"ok"`
+			Action string `json:"action"`
+		}
+		raw, err := json.Marshal(res.StructuredContent)
+		if err != nil {
+			t.Errorf("%s: marshal structured content: %v", c.tool, err)
+			continue
+		}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Errorf("%s: decode structured content: %v", c.tool, err)
+			continue
+		}
+		if !out.OK || out.Action != c.action {
+			t.Errorf("%s reported %+v, want ok with action %q", c.tool, out, c.action)
 		}
 	}
 }
@@ -402,14 +423,51 @@ func TestAFailedWriteToolReportsAnError(t *testing.T) {
 	}
 }
 
-// The version a client is told is read from the build, so it cannot go stale
-// the way a written-down one did -- it said 0.0.4 for three releases.
-func TestTheAdvertisedVersionIsNotHardcoded(t *testing.T) {
-	if v := version(); v == "" {
-		t.Fatal("version must not be empty")
+// Reading the real build info only ever exercises one case, so the
+// interpretation is tested directly.
+func TestVersionFromBuildInfo(t *testing.T) {
+	cases := []struct {
+		name string
+		info *debug.BuildInfo
+		ok   bool
+		want string
+	}{
+		{"installed at a tag", &debug.BuildInfo{Main: debug.Module{Version: "v1.2.3"}}, true, "1.2.3"},
+		{"pseudo-version", &debug.BuildInfo{Main: debug.Module{Version: "v1.2.4-0.20260101120000-abcdef123456"}}, true, "1.2.4-0.20260101120000-abcdef123456"},
+		{"built from a checkout", &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, true, devVersion},
+		{"no stamp", &debug.BuildInfo{Main: debug.Module{Version: ""}}, true, devVersion},
+		{"no build info", nil, false, devVersion},
 	}
-	if v := version(); v == "0.0.4" {
-		t.Errorf("version %q looks like the hardcoded one this replaced", v)
+
+	for _, c := range cases {
+		if got := versionFrom(c.info, c.ok); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// And the computed one is what a client is actually told, which is the part a
+// written-down literal got wrong.
+func TestTheVersionAClientIsToldComesFromTheBuild(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := Server(Deps{}).Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("connect server: %v", err)
+	}
+	defer serverSession.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("connect client: %v", err)
+	}
+	defer clientSession.Close()
+
+	if told := clientSession.InitializeResult().ServerInfo.Version; told != version() {
+		t.Errorf("a client is told %q, but the build says %q", told, version())
 	}
 }
 
@@ -423,4 +481,23 @@ func textOf(t *testing.T, res *mcp.CallToolResult) string {
 		}
 	}
 	return out.String()
+}
+
+// A writer held as an interface can be a nil pointer, which is not a nil
+// interface -- so the "no writer" check cannot catch it and Enabled is asked
+// anyway. It must answer rather than panic, or a misconfigured server dies at
+// startup instead of coming up with writes off.
+func TestATypedNilWriterRegistersOnlyReadTools(t *testing.T) {
+	var writer *write.Writer // nil, but not a nil write.Actions
+
+	tools := listTools(t, Deps{Writer: writer})
+
+	for _, name := range writeToolNames {
+		if _, found := tools[name]; found {
+			t.Errorf("%s must not be registered for a nil writer", name)
+		}
+	}
+	if len(tools) == 0 {
+		t.Fatal("read tools should still be registered")
+	}
 }

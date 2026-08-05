@@ -6,14 +6,19 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/SohrabZ/x-browser-mcp/internal/auth"
+	"github.com/SohrabZ/x-browser-mcp/internal/browser"
 	"github.com/SohrabZ/x-browser-mcp/internal/limit"
+	"github.com/SohrabZ/x-browser-mcp/internal/pool"
 	"github.com/SohrabZ/x-browser-mcp/internal/read"
 	"github.com/SohrabZ/x-browser-mcp/internal/write"
 	"github.com/SohrabZ/x-browser-mcp/internal/xui"
@@ -26,6 +31,10 @@ type Deps struct {
 	Writer write.Actions
 	MCP    *mcp.Server
 	Log    *slog.Logger
+
+	// ListenAddr is the address the server was told to bind. The handler needs
+	// it to know which Host names itself; see guard.
+	ListenAddr string
 }
 
 // maxBody caps request bodies. The endpoints take a handful of small fields, so
@@ -125,7 +134,61 @@ func Handler(deps Deps) http.Handler {
 		mux.Handle("/mcp/", handler)
 	}
 
-	return logging(deps.Log, mux)
+	return logging(deps.Log, guard(deps.ListenAddr, mux))
+}
+
+// guard rejects requests a web page could have made.
+//
+// The server binds loopback and has no authentication, so the only thing between
+// it and a page you happen to visit is supposed to be that the page cannot reach
+// the port. It can. A domain the attacker controls, re-resolved to 127.0.0.1
+// after the page has loaded, gives that page a route to the port -- DNS
+// rebinding. The browser still sends the name it dialled, so requiring Host to
+// name this server is what closes it, and refusing a cross-site Origin closes the
+// simpler case of a page fetching the port directly.
+//
+// The Host check applies only to a loopback bind, which is the deployment being
+// attacked. An operator who bound elsewhere has clients that legitimately dial by
+// another name, and has already been warned that doing so exposes the session.
+func guard(listenAddr string, next http.Handler) http.Handler {
+	allowed := map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true}
+	loopbackOnly := true
+	if host := hostOf(listenAddr); host != "" && !allowed[host] {
+		allowed[host] = true
+		loopbackOnly = false
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A client that is not a browser sends no Origin. One that does is a
+		// page, and only a page served from this machine has any business here.
+		if origin := r.Header.Get("Origin"); origin != "" && !allowed[originHost(origin)] {
+			writeJSON(w, http.StatusForbidden, errorBody{Error: "cross-origin request refused"})
+			return
+		}
+		if loopbackOnly && !allowed[hostOf(r.Host)] {
+			writeJSON(w, http.StatusForbidden, errorBody{Error: "refused: the request does not address this server by name"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hostOf drops the port and any brackets from an address or a Host header.
+func hostOf(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return strings.Trim(host, "[]")
+	}
+	return strings.Trim(addr, "[]")
+}
+
+// originHost is the host an Origin names, or "" if it names none -- which is what
+// a sandboxed or file-served page sends, and is not this server either way.
+func originHost(origin string) string {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return ""
+	}
+	return hostOf(u.Host)
 }
 
 // Server wraps the handler with timeouts.
@@ -237,16 +300,36 @@ func respond(w http.ResponseWriter, log *slog.Logger, res read.Result, err error
 }
 
 // writeErr maps errors to status codes and keeps internals out of the response.
+//
+// Only a fault the caller can do nothing about is hidden. Everything a caller
+// could act on says what it was: a list id that does not exist is not a server
+// error, and reporting it as one leaves them re-sending a request that will never
+// work.
 func writeErr(w http.ResponseWriter, log *slog.Logger, err error) {
 	status := http.StatusInternalServerError
 	message := "internal error"
 
-	var exhausted *limit.ExhaustedError
+	var (
+		exhausted *limit.ExhaustedError
+		badInput  *read.InvalidError
+		missing   *read.NotFoundError
+	)
 	switch {
 	case errors.Is(err, auth.ErrLoginRequired):
 		status, message = http.StatusPreconditionFailed, err.Error()
 	case errors.As(err, &exhausted):
 		status, message = http.StatusTooManyRequests, err.Error()
+	case errors.As(err, &badInput):
+		status, message = http.StatusBadRequest, err.Error()
+	case errors.As(err, &missing):
+		status, message = http.StatusNotFound, err.Error()
+	case errors.Is(err, browser.ErrProfileInUse), errors.Is(err, pool.ErrClosed):
+		// Temporary and self-explanatory: a login or a write holds the profile,
+		// or the server is shutting down. Neither is worth hiding, and both are
+		// worth retrying.
+		status, message = http.StatusServiceUnavailable, err.Error()
+	case errors.Is(err, context.DeadlineExceeded):
+		status, message = http.StatusGatewayTimeout, "the read did not finish in time"
 	default:
 		// Internal errors can carry filesystem paths and profile locations, so
 		// the detail goes to the log and the caller gets a generic message.

@@ -107,7 +107,12 @@ func New(opts Options) *Writer {
 }
 
 // Enabled reports whether writes are available.
-func (w *Writer) Enabled() bool { return w.gate.Enabled() }
+//
+// Safe on a nil Writer, because the transports hold one as an Actions and a nil
+// pointer in an interface is not a nil interface: their "no writer configured"
+// check cannot catch it, so answering honestly here is what keeps a missing
+// writer from being a panic at startup.
+func (w *Writer) Enabled() bool { return w != nil && w.gate.Enabled() }
 
 // Post publishes a new post.
 func (w *Writer) Post(ctx context.Context, text, confirm string) error {
