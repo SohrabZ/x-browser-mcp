@@ -87,53 +87,20 @@ type Session struct {
 	release func()
 }
 
-// Open starts Chrome and connects to it, using ctx for both how long startup
-// may take and how long the browser lives.
-func Open(ctx context.Context, opts Options) (*Session, error) {
-	return OpenWithin(ctx, ctx, opts)
-}
-
-// OpenWithin starts Chrome with startup bounded separately from lifetime.
+// Open starts Chrome and connects to it. It returns only once the launch has
+// resolved, one way or the other.
 //
-// A pooled browser must outlive the request that happened to warm it, but that
-// request still needs its deadline respected: a stalled launch would otherwise
-// run past the caller's timeout while the pool's opening claim kept every other
-// acquire and reservation waiting behind it.
-//
-// If startup outruns start, the caller is released immediately and the browser
-// is closed in the background once it eventually appears -- abandoning it would
-// leave a Chrome holding the profile with nothing tracking it.
-func OpenWithin(lifetime, start context.Context, opts Options) (*Session, error) {
-	type result struct {
-		session *Session
-		err     error
-	}
-	ch := make(chan result, 1)
-
-	go func() {
-		s, err := openBlocking(lifetime, opts)
-		ch <- result{s, err}
-	}()
-
-	select {
-	case r := <-ch:
-		return r.session, r.err
-	case <-start.Done():
-		go func() {
-			if r := <-ch; r.session != nil {
-				r.session.Close()
-			}
-		}()
-		return nil, fmt.Errorf("browser startup exceeded the caller's deadline: %w", start.Err())
-	}
-}
-
-// openBlocking does the launch and connect. It returns only when Chrome is up.
+// There is deliberately no way to give up on a launch early. An abandoned
+// launch is worse than a slow one: the Chrome it started still arrives, still
+// takes the profile, and nothing is tracking it -- which is exactly the
+// duplicate-browser failure the caller was trying to avoid. Callers that cannot
+// wait should stop waiting on their own; ownership stays with whoever started
+// the launch until it finishes.
 //
 // When a persistent profile is configured it is created if missing and checked
-// for a competing Chrome first; it fails with ErrProfileInUse rather than
+// for a competing Chrome first; Open fails with ErrProfileInUse rather than
 // letting two instances corrupt each other's state.
-func openBlocking(ctx context.Context, opts Options) (*Session, error) {
+func Open(ctx context.Context, opts Options) (*Session, error) {
 	persistent := opts.ProfileDir != ""
 
 	if persistent {

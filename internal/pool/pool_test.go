@@ -537,9 +537,10 @@ func (b *blockingSession) Close() error {
 func TestReserveWaitsForAnInFlightLaunch(t *testing.T) {
 	launching := make(chan struct{})
 	finish := make(chan struct{})
+	var once sync.Once
 
 	p := New(func(context.Context) (Session, error) {
-		close(launching)
+		once.Do(func() { close(launching) })
 		<-finish // still starting Chrome
 		return &fakeSession{}, nil
 	}, time.Minute)
@@ -829,5 +830,76 @@ func TestWedgedLivenessProbeDoesNotBlockThePool(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("reserve never returned while a liveness probe was wedged")
+	}
+}
+
+// flakySession answers the first probe slowly (timing out) and later ones
+// quickly, so two concurrent probes disagree about whether it is usable.
+type flakySession struct {
+	fakeSession
+	probes atomic.Int64
+	inUse  atomic.Int64
+}
+
+func (f *flakySession) Alive(ctx context.Context) bool {
+	if f.probes.Add(1) == 1 {
+		<-ctx.Done() // first probe never answers
+		return false
+	}
+	return true
+}
+
+func (f *flakySession) Close() error {
+	if f.inUse.Load() > 0 {
+		panic("closed while a caller still held a lease on it")
+	}
+	return f.fakeSession.Close()
+}
+
+// Concurrent probes can disagree under a one-second timeout: one retires the
+// browser while another calls it healthy. The retirement has to win, and the
+// browser must not be closed while any caller still holds it -- otherwise one
+// bad probe turns into several failed requests against a closing connection.
+func TestConcurrentProbesDoNotCloseALeasedSession(t *testing.T) {
+	flaky := &flakySession{}
+
+	p := New(func(context.Context) (Session, error) {
+		return &fakeSession{}, nil
+	}, time.Minute)
+	defer p.Close()
+
+	p.mu.Lock()
+	p.session = flaky
+	p.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			l, err := p.Acquire(context.Background())
+			if err != nil {
+				return
+			}
+			// Whatever we were handed must stay usable for as long as we hold it.
+			if s, ok := l.Session.(*flakySession); ok {
+				// Held deliberately longer than the failing probe takes to time
+				// out, so retirement lands while this caller is mid-read -- the
+				// overlap that closing immediately would break.
+				s.inUse.Add(1)
+				time.Sleep(2 * time.Second)
+				s.inUse.Add(-1)
+			}
+			l.Release()
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("concurrent probes deadlocked the pool")
 	}
 }

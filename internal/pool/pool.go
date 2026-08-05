@@ -111,6 +111,11 @@ type Pool struct {
 	// is closed on release, which is what waiting acquires block on.
 	exclusive chan struct{}
 
+	// retiring is a session taken out of service that still has leases on it.
+	// It cannot be closed yet -- callers are using it -- but no new lease may
+	// be handed out either, so it is held here until the last one drains.
+	retiring Session
+
 	// unreleased records a shutdown that could not confirm the browser exited.
 	// While set, the profile may still be held by a process the pool no longer
 	// tracks, so exclusivity cannot honestly be granted.
@@ -122,10 +127,6 @@ type Pool struct {
 	now       func() time.Time
 	afterFunc func(time.Duration, func()) *time.Timer
 }
-
-// launchBudget bounds a browser launch that no caller is waiting for any more.
-// Without it a wedged Chrome would hold the pool's opening claim forever.
-const launchBudget = 2 * time.Minute
 
 // New builds a pool. A session with no outstanding leases is closed once it has
 // been idle for the given duration; zero disables warming entirely.
@@ -140,19 +141,6 @@ func New(open Opener, idle time.Duration) *Pool {
 	return p
 }
 
-// launchContext bounds a launch independently of whoever asked for it, since
-// the launch outlives an impatient caller.
-func (p *Pool) launchContext() context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), launchBudget)
-	// The launch either finishes or is abandoned at the budget; either way the
-	// context is released then.
-	go func() {
-		<-ctx.Done()
-		cancel()
-	}()
-	return ctx
-}
-
 // quietLocked reports that nothing holds or is about to hold the profile: no
 // outstanding leases, no launch in flight, no close still finishing.
 //
@@ -160,7 +148,33 @@ func (p *Pool) launchContext() context.Context {
 // lease yet but is about to own a browser, and a discarded Chrome keeps the
 // profile lock until its process exits.
 func (p *Pool) quietLocked() bool {
-	return p.leases == 0 && p.opening == nil && p.closing == nil
+	return p.leases == 0 && p.opening == nil && p.closing == nil && p.retiring == nil
+}
+
+// retireLocked takes a session out of service. It is closed once the last lease
+// on it is returned -- closing a browser other callers are mid-read on would
+// turn one bad probe into several failed requests.
+func (p *Pool) retireLocked(s Session) {
+	if s == nil {
+		return
+	}
+	if p.session == s {
+		p.session = nil
+	}
+	if p.leases > 0 {
+		p.retiring = s
+		return
+	}
+	p.beginCloseLocked(s)
+}
+
+// closeRetiredLocked closes a retired session once nothing holds it.
+func (p *Pool) closeRetiredLocked() {
+	if p.retiring != nil && p.leases == 0 {
+		s := p.retiring
+		p.retiring = nil
+		p.beginCloseLocked(s)
+	}
 }
 
 // beginCloseLocked retires a session, tracking the shutdown so nothing opens a
@@ -248,19 +262,27 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 			p.leases++
 			p.mu.Unlock()
 
-			if alive(ctx, candidate) {
+			healthy := alive(ctx, candidate)
+
+			p.mu.Lock()
+			// Another prober may have retired this session while we were asking
+			// it. Concurrent probes can disagree -- one times out, one succeeds --
+			// and the retirement wins: handing back a browser already on its way
+			// out would have callers working against a closing connection.
+			retired := p.session != candidate
+
+			if healthy && !retired {
+				p.mu.Unlock()
 				return &Lease{Session: candidate, pool: p}, nil
 			}
 
-			// Dead. Give the lease back and retire it, then start over.
-			p.mu.Lock()
 			if p.leases > 0 {
 				p.leases--
 			}
-			if p.session == candidate {
-				p.session = nil
-				p.beginCloseLocked(candidate)
+			if !healthy {
+				p.retireLocked(candidate)
 			}
+			p.closeRetiredLocked()
 			p.drained.Broadcast()
 			p.mu.Unlock()
 			continue
@@ -289,7 +311,9 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 		// acquire or reservation would go at the same profile behind its back.
 		launched := make(chan error, 1)
 		go func() {
-			session, err := p.open(p.launchContext())
+			// Not the caller's context: the launch belongs to the pool, and giving
+			// up on it early would leave a Chrome arriving with nothing tracking it.
+			session, err := p.open(context.Background())
 
 			p.mu.Lock()
 			if err == nil {
@@ -439,6 +463,8 @@ func (p *Pool) release() {
 		p.leases--
 	}
 	if p.leases == 0 {
+		// A session retired mid-use is closed now that nothing holds it.
+		p.closeRetiredLocked()
 		p.drained.Broadcast()
 		p.armIdleTimerLocked()
 	}

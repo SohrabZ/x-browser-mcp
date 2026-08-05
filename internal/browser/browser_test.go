@@ -262,31 +262,24 @@ func TestCloseWaitsForChromeToExitAndFreesTheProfile(t *testing.T) {
 	replacement.Close()
 }
 
-// A stalled launch must not outrun the caller's deadline. The pooled browser
-// lives as long as the server, but the request that triggered the launch still
-// has a timeout, and the pool's opening claim keeps every other acquire waiting
-// behind it until this returns.
-func TestOpenWithinHonoursTheStartDeadline(t *testing.T) {
-	lifetime, cancelLifetime := context.WithCancel(context.Background())
-	defer cancelLifetime()
+// Startup deliberately has no early-abandon path. A launch that is given up on
+// still produces a Chrome that takes the profile, with nothing tracking it --
+// the duplicate-browser failure the pool exists to prevent. Ownership therefore
+// stays with the launch until it resolves, and callers stop waiting on their
+// own side.
+func TestOpenHasNoEarlyAbandonPath(t *testing.T) {
+	// An already-cancelled context must not make Open return before the launch
+	// has actually resolved one way or the other.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 
-	start, cancelStart := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancelStart()
-
-	// A path that is not a browser: rod will fail or hang, and either way the
-	// start deadline is the thing that has to release us.
-	began := time.Now()
-	_, err := OpenWithin(lifetime, start, Options{
-		ChromePath: "/nonexistent/definitely-not-chrome",
-		Headless:   true,
-	})
-	elapsed := time.Since(began)
-
+	_, err := Open(ctx, Options{ChromePath: "/nonexistent/definitely-not-chrome", Headless: true})
 	if err == nil {
-		t.Fatal("expected startup to fail")
+		t.Fatal("expected a launch against a missing binary to fail")
 	}
-	if elapsed > 20*time.Second {
-		t.Fatalf("startup ran for %s; the caller's deadline did not release it", elapsed)
+	// The failure must come from the launch itself, not from abandoning it.
+	if strings.Contains(err.Error(), "deadline") || strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("Open abandoned the launch instead of resolving it: %v", err)
 	}
 }
 

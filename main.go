@@ -87,10 +87,11 @@ func run() error {
 	browserCtx, closeBrowsers := context.WithCancel(context.Background())
 	defer closeBrowsers()
 
-	browsers := pool.New(func(startCtx context.Context) (pool.Session, error) {
-		// Two different clocks: the browser lives as long as the server, but the
-		// caller that triggered the launch still gets its deadline honoured.
-		return browser.OpenWithin(browserCtx, startCtx, browser.Options{
+	browsers := pool.New(func(context.Context) (pool.Session, error) {
+		// The browser lives as long as the server, never as long as the request
+		// that happened to warm it. An impatient caller stops waiting; the pool
+		// keeps tracking the launch either way.
+		return browser.Open(browserCtx, browser.Options{
 			ChromePath:  cfg.ChromePath,
 			ProfileDir:  cfg.ProfileDir(),
 			ProfileName: cfg.ProfileName,
