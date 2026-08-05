@@ -451,6 +451,13 @@ func (w *Writer) fail(rec Record, err error) error {
 	return err
 }
 
+// NotFoundError marks a post X did not render. Liking a deleted or private post
+// is not a fault of this server's, and the caller needs to know the target is
+// gone rather than be told to try again.
+type NotFoundError struct{ Reason string }
+
+func (e *NotFoundError) Error() string { return e.Reason }
+
 // NotAppliedError marks an action that was carried out and that X did not apply.
 //
 // Distinct from a fault: the machinery worked, so what it says is an answer the
@@ -602,8 +609,15 @@ func pressOnPost(p *browser.Page, postID, selector string, budget time.Duration)
 		}
 		if time.Now().After(deadline) {
 			if state == noPost {
-				return fmt.Errorf("press %s: X rendered no post to press it on", selector)
+				// The address loaded and X put no post on it. That is the
+				// caller's answer, not a fault: the post is deleted, private, or
+				// the id is wrong. The selector is no part of it.
+				return &NotFoundError{Reason: "no post at that address; it may be deleted, private, or the id may be wrong"}
 			}
+			// The post is there and the control is not, which is either X
+			// withholding it or this server's selectors having drifted. Those are
+			// not distinguishable from here, and one of them is a fault, so this
+			// stays unclassified and goes to the log.
 			return fmt.Errorf("press %s: the post does not offer that control", selector)
 		}
 		time.Sleep(pollInterval)

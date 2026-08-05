@@ -69,6 +69,14 @@ const internalMessage = "internal error"
 //
 // A nil error is Internal with no message; callers are expected to check for
 // success before asking.
+//
+// Two things this does not do. It trusts the message of an error it recognises:
+// whoever builds one is responsible for it holding nothing internal, and the
+// types exist so that is a deliberate act rather than a wrapper's accident. And
+// its precedence is the order below, which matters only for an error satisfying
+// two cases at once -- nothing builds one today, and the order says an outcome
+// X reported beats a deadline that also passed, because the outcome is the more
+// specific answer.
 func Describe(err error) (Kind, string) {
 	if err == nil {
 		return Internal, ""
@@ -79,6 +87,7 @@ func Describe(err error) (Kind, string) {
 		badRead    *read.InvalidError
 		missing    *read.NotFoundError
 		badWrite   *write.InvalidError
+		goneWrite  *write.NotFoundError
 		notApplied *write.NotAppliedError
 	)
 
@@ -97,6 +106,8 @@ func Describe(err error) (Kind, string) {
 		return Invalid, badWrite.Error()
 	case errors.As(err, &missing):
 		return Missing, missing.Error()
+	case errors.As(err, &goneWrite):
+		return Missing, goneWrite.Error()
 	case errors.As(err, &notApplied):
 		return NotApplied, notApplied.Error()
 	case errors.Is(err, browser.ErrProfileInUse):

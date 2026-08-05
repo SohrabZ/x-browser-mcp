@@ -295,6 +295,8 @@ func TestAFailedWriteReportsWhyAndBlamesTheRightSide(t *testing.T) {
 		{"not signed in", auth.ErrLoginRequired, http.StatusPreconditionFailed},
 		{"bad input", &write.InvalidError{Reason: "post text is required"}, http.StatusBadRequest},
 		{"X dropped it", &write.NotAppliedError{Reason: "like did not stick"}, http.StatusBadGateway},
+		// Liking a deleted or private post is the caller's answer, not a fault.
+		{"no such post", &write.NotFoundError{Reason: "no post at that address"}, http.StatusNotFound},
 		// A plain error from anywhere is a fault of this process until it is
 		// classified, so its text is not the caller's to read.
 		{"unclassified", errors.New("cdp connection closed"), http.StatusInternalServerError},

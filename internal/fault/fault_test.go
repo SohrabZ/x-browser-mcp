@@ -31,6 +31,7 @@ func TestDescribeClassifiesEachFailure(t *testing.T) {
 		{"bad write request", &write.InvalidError{Reason: "post text is required"}, Invalid, "post text is required"},
 		{"nothing there", &read.NotFoundError{Reason: "no posts found"}, Missing, "no posts found"},
 		{"X did not apply it", &write.NotAppliedError{Reason: "like did not stick"}, NotApplied, "like did not stick"},
+		{"no such post to act on", &write.NotFoundError{Reason: "no post at that address"}, Missing, "no post at that address"},
 		{"profile in use", browser.ErrProfileInUse, Busy, browser.ErrProfileInUse.Error()},
 		{"shutting down", pool.ErrClosed, Busy, pool.ErrClosed.Error()},
 		{"out of time", context.DeadlineExceeded, Timeout, "the request did not finish in time"},
@@ -120,5 +121,32 @@ func TestNoErrorIsNotDescribed(t *testing.T) {
 	kind, says := Describe(nil)
 	if kind != Internal || says != "" {
 		t.Errorf("got %v %q, want Internal and no message", kind, says)
+	}
+}
+
+// Precedence only matters for an error satisfying two cases at once. Nothing
+// builds one today, so this pins the policy rather than a behaviour: an outcome X
+// reported beats a deadline that also passed, because the outcome is the more
+// specific answer. If that is ever wrong, it should be wrong loudly here.
+func TestPrecedenceBetweenTwoCauses(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		kind Kind
+	}{
+		{"outcome beats deadline",
+			errors.Join(&write.NotAppliedError{Reason: "like did not stick"}, context.DeadlineExceeded), NotApplied},
+		{"absence beats deadline",
+			errors.Join(&read.NotFoundError{Reason: "no posts found"}, context.DeadlineExceeded), Missing},
+		{"a refusal beats everything, since nothing was attempted",
+			errors.Join(write.ErrBadConfirmation, context.DeadlineExceeded), Refused},
+		{"a deadline still wins over an unrecognised fault",
+			errors.Join(errors.New("cdp closed"), context.DeadlineExceeded), Timeout},
+	}
+
+	for _, c := range cases {
+		if kind, _ := Describe(c.err); kind != c.kind {
+			t.Errorf("%s: kind %v, want %v", c.name, kind, c.kind)
+		}
 	}
 }

@@ -206,3 +206,18 @@ func TestABadURLIsTheCallersMistakeNotAFault(t *testing.T) {
 		}
 	}
 }
+
+// One of the readers of these messages is a model, so quoting a caller's input
+// back has to be bounded: an unbounded message is a way to fill a context window
+// with one bad request.
+func TestAnEnormousURLIsNotQuotedBackWhole(t *testing.T) {
+	huge := "https://example.com/" + strings.Repeat("a", 20000) // not an x.com URL
+
+	_, _, err := New(Options{}).FromURL(context.Background(), huge, 5)
+	if err == nil {
+		t.Fatal("a 20k URL was accepted")
+	}
+	if n := len(err.Error()); n > maxMessage+len("...") {
+		t.Errorf("the message is %d chars; it should be bounded at %d", n, maxMessage)
+	}
+}

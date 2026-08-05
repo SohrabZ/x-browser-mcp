@@ -324,6 +324,17 @@ func TestAWriteThatXDidNotApplyStillSaysSo(t *testing.T) {
 	}
 }
 
+// And a post that is not there says that, rather than sending the model to retry
+// an action against something deleted.
+func TestAMissingPostSaysSoRatherThanFailing(t *testing.T) {
+	reason := "no post at that address; it may be deleted, private, or the id may be wrong"
+	got := textOf(t, errorResult(nil, &write.NotFoundError{Reason: reason}))
+
+	if got != reason {
+		t.Errorf("the model was told %q, want %q", got, reason)
+	}
+}
+
 // fakeActions records which action a tool reached for.
 type fakeActions struct {
 	calls []string
