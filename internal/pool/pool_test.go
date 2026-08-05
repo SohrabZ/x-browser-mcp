@@ -313,3 +313,64 @@ func TestDoubleReleaseIsSafe(t *testing.T) {
 		t.Fatal("a duplicate release should be a no-op")
 	}
 }
+
+// deadSession reports itself unusable, as a session does once its browser has
+// crashed, been killed, or been quit by the user.
+type deadSession struct{ fakeSession }
+
+func (d *deadSession) Alive() bool { return false }
+
+// A browser that dies underneath the pool must be replaced, not handed out
+// again. Reusing it fails every call, and nothing recovers until the idle timer
+// happens to fire.
+func TestDeadSessionIsReplaced(t *testing.T) {
+	var launches atomic.Int64
+	first := &deadSession{}
+
+	p := New(func(context.Context) (Session, error) {
+		if launches.Add(1) == 1 {
+			return first, nil
+		}
+		return &fakeSession{}, nil
+	}, time.Minute)
+	defer p.Close()
+
+	l1, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	l1.Release()
+
+	l2, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	defer l2.Release()
+
+	if l2.Session == Session(first) {
+		t.Fatal("the dead session was handed out again")
+	}
+	if !first.closed.Load() {
+		t.Error("the dead session should have been closed")
+	}
+	if got := launches.Load(); got != 2 {
+		t.Fatalf("expected a replacement browser, got %d launches", got)
+	}
+}
+
+// Sessions that cannot report liveness are assumed usable; the pool has nothing
+// better to go on and must not discard them every time.
+func TestSessionWithoutLivenessCheckIsReused(t *testing.T) {
+	open, launches, _ := counting()
+	p := New(open, time.Minute)
+	defer p.Close()
+
+	l1, _ := p.Acquire(t.Context())
+	l1.Release()
+	l2, _ := p.Acquire(t.Context())
+	defer l2.Release()
+
+	if got := launches.Load(); got != 1 {
+		t.Fatalf("expected reuse, got %d launches", got)
+	}
+}

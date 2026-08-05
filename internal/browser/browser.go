@@ -130,6 +130,22 @@ func (s *Session) Page() (*Page, error) {
 	return &Page{page: p}, nil
 }
 
+// Alive reports whether the browser is still reachable.
+//
+// Chrome can go away without this process being told -- a crash, an OOM kill,
+// or the user quitting it -- after which every call fails with a closed
+// connection. A pooled session is checked before reuse so a dead browser is
+// replaced rather than handed out repeatedly.
+func (s *Session) Alive() bool {
+	if s == nil || s.browser == nil {
+		return false
+	}
+	// Any round trip to the browser proves the connection is live; asking for
+	// the page list is the cheapest one available.
+	_, err := s.browser.Pages()
+	return err == nil
+}
+
 // Cookies returns every cookie the browser currently holds.
 func (s *Session) Cookies() ([]*proto.NetworkCookie, error) {
 	return s.browser.GetCookies()

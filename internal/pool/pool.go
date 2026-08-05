@@ -27,6 +27,23 @@ type Session interface {
 	Close()
 }
 
+// Checker is a session that can report whether it is still usable.
+//
+// A pooled handle can stop working without the pool being told: Chrome can
+// crash, be killed, or be quit by the user, and the session then fails every
+// call with a closed-connection error. Sessions implementing this are checked
+// before being handed out so a dead browser is replaced rather than reused.
+type Checker interface {
+	Alive() bool
+}
+
+// alive reports whether a session is usable. Sessions that cannot answer are
+// assumed usable, since the pool has nothing better to go on.
+func alive(s Session) bool {
+	c, ok := s.(Checker)
+	return !ok || c.Alive()
+}
+
 // Opener starts a new session.
 type Opener func(ctx context.Context) (Session, error)
 
@@ -90,6 +107,14 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 	}
 	p.stopIdleTimerLocked()
 
+	// A pooled browser can die without the pool being told -- a crash, an OOM
+	// kill, or the user quitting it -- and then fails every call. Drop a dead
+	// one instead of handing it out.
+	var dead Session
+	if p.session != nil && !alive(p.session) {
+		dead, p.session = p.session, nil
+	}
+
 	if p.session != nil {
 		p.leases++
 		session := p.session
@@ -97,6 +122,10 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 		return &Lease{Session: session, pool: p}, nil
 	}
 	p.mu.Unlock()
+
+	if dead != nil {
+		dead.Close()
+	}
 
 	// Opening is slow and must not hold the lock, or every caller queues behind
 	// the first one's browser launch.
