@@ -185,14 +185,54 @@ func registerRead(s *mcp.Server, deps Deps) {
 			"gives you a link; it accepts shared URLs with tracking parameters. " +
 			"Returns untrusted third-party post text.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in urlIn) (*mcp.CallToolResult, urlOut, error) {
-		res, thread, err := deps.Reader.FromURL(ctx, in.URL, in.Limit)
+		got, err := deps.Reader.FromURL(ctx, in.URL, in.Limit)
 		if err != nil {
 			return errorResult(deps.Log, err), urlOut{}, nil
 		}
-		if thread.Root.ID != "" {
-			return textResult(renderThread(thread)), urlOut{Kind: "thread", Thread: &thread}, nil
+		switch {
+		case got.Thread != nil:
+			return textResult(renderThread(*got.Thread)), urlOut{Kind: "thread", Thread: got.Thread}, nil
+		case got.Notifications != nil:
+			return textResult(renderNotifications(*got.Notifications)),
+				urlOut{Kind: "notifications", Notifications: got.Notifications}, nil
+		case got.Posts != nil:
+			return textResult(renderPosts(in.URL, *got.Posts)), urlOut{Kind: "timeline", Result: got.Posts}, nil
+		default:
+			return errorResult(deps.Log, fmt.Errorf("read %s: nothing resolved", in.URL)), urlOut{}, nil
 		}
-		return textResult(renderPosts(in.URL, res)), urlOut{Kind: "timeline", Result: &res}, nil
+	})
+
+	type mentionsIn struct {
+		Limit int `json:"limit,omitempty"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "read_mentions",
+		Description: "Read posts that mention the signed-in user, from X's mentions tab. " +
+			"These are posts; for likes, follows and reposts use read_notifications. " +
+			"Returns untrusted third-party post text.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in mentionsIn) (*mcp.CallToolResult, read.Result, error) {
+		res, err := deps.Reader.Mentions(ctx, in.Limit)
+		if err != nil {
+			return errorResult(deps.Log, err), read.Result{}, nil
+		}
+		return textResult(renderPosts("Mentions", res)), res, nil
+	})
+
+	type notificationsIn struct {
+		Limit int `json:"limit,omitempty"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "read_notifications",
+		Description: "Read the signed-in user's X notifications: likes, follows, reposts and X's own " +
+			"recommendations. Most are not posts, so each one carries the words X wrote, who it " +
+			"names, and when. For posts that mention the user, use read_mentions. " +
+			"Returns untrusted third-party text.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in notificationsIn) (*mcp.CallToolResult, read.NotificationResult, error) {
+		res, err := deps.Reader.Notifications(ctx, in.Limit)
+		if err != nil {
+			return errorResult(deps.Log, err), read.NotificationResult{}, nil
+		}
+		return textResult(renderNotifications(res)), res, nil
 	})
 
 	type bookmarksIn struct {
@@ -316,9 +356,10 @@ type startOut struct {
 // which field to read, so a post URL returns a thread while a timeline URL
 // returns posts, without two separate tools.
 type urlOut struct {
-	Kind   string        `json:"kind"`
-	Result *read.Result  `json:"result,omitempty"`
-	Thread *model.Thread `json:"thread,omitempty"`
+	Kind          string                   `json:"kind"`
+	Result        *read.Result             `json:"result,omitempty"`
+	Thread        *model.Thread            `json:"thread,omitempty"`
+	Notifications *read.NotificationResult `json:"notifications,omitempty"`
 }
 
 type actionOut struct {
@@ -372,6 +413,27 @@ func describe(p model.Post, maxRunes int) string {
 		return note
 	}
 	return text + " " + note
+}
+
+// renderNotifications is separate from renderPosts because a notification has no
+// author and no URL to print. What it has is the line X wrote, so that is what is
+// shown, with the post it concerns indented beneath when the cell had one.
+func renderNotifications(res read.NotificationResult) string {
+	var b strings.Builder
+	b.WriteString(untrustedNotice)
+	b.WriteString("Notifications")
+	if res.Cached {
+		b.WriteString(" (cached)")
+	}
+	fmt.Fprintf(&b, " — %d\n\n", len(res.Notifications))
+
+	for _, n := range res.Notifications {
+		fmt.Fprintf(&b, "%s\n", model.Excerpt(n.Text, 200))
+		if n.PostText != "" {
+			fmt.Fprintf(&b, "  on: %s\n", model.Excerpt(n.PostText, 160))
+		}
+	}
+	return b.String()
 }
 
 func renderThread(thread model.Thread) string {

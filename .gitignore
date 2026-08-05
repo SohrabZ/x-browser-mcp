@@ -16,6 +16,10 @@ chrome-user-data/
 *.out
 *.test
 
+# Agent tooling state, written into the working directory by whatever is driving
+# the session. None of it describes this project.
+/.hermes/
+
 # Editor / OS
 .DS_Store
 .idea/

@@ -163,16 +163,21 @@ type Notification struct {
 	// Kind is best effort, and empty when it could not be told.
 	//
 	// X marks the difference between a like and a follow only with an icon that
-	// carries no identifier, and with English words in the text. So this is read
-	// from those words and will be empty under a different interface language,
-	// where Text still says what happened.
+	// carries no identifier, and with English words in the text, so this is read
+	// from those words. It will be empty under a different interface language, and
+	// it is empty for about a fifth of cells on a real account even in English:
+	// X renders some as nothing but a display name and a time, with the post
+	// underneath and no verb anywhere. For those, neither this nor Text says what
+	// happened -- PostText is the only content, and a reader has to treat the cell
+	// as "something involving this account and this post".
 	Kind string `json:"kind,omitempty"`
 
 	// Actors are the accounts the cell names. More than one is normal.
 	Actors []Author `json:"actors,omitempty"`
 
 	// Text is the line X wrote, such as "Ramyar Khalili and Somnia Lab liked
-	// your post". It is the only field guaranteed to describe the event.
+	// your post", including the relative time it renders after it. It is the only
+	// field always present, though see Kind: for some cells it is only a name.
 	Text string `json:"text"`
 
 	// PostText is the post the notification concerns, when the cell shows one. A

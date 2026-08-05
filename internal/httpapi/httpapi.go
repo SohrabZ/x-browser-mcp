@@ -78,6 +78,22 @@ func Handler(deps Deps) http.Handler {
 		respond(w, deps.Log, res, err)
 	})
 
+	mux.HandleFunc("GET /api/v1/mentions", func(w http.ResponseWriter, r *http.Request) {
+		res, err := deps.Reader.Mentions(r.Context(), intParam(r, "limit"))
+		respond(w, deps.Log, res, err)
+	})
+
+	// Notifications answer with their own shape rather than a Result, because
+	// most of them are not posts.
+	mux.HandleFunc("GET /api/v1/notifications", func(w http.ResponseWriter, r *http.Request) {
+		res, err := deps.Reader.Notifications(r.Context(), intParam(r, "limit"))
+		if err != nil {
+			writeErr(w, deps.Log, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	})
+
 	mux.HandleFunc("GET /api/v1/user/{handle}", func(w http.ResponseWriter, r *http.Request) {
 		res, err := deps.Reader.UserPosts(r.Context(), r.PathValue("handle"), intParam(r, "limit"))
 		respond(w, deps.Log, res, err)
