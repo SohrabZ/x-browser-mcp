@@ -129,9 +129,17 @@ func TestTheNotificationRoutesAreDistinctTargets(t *testing.T) {
 		}
 	}
 
-	// A tab this cannot read is still unsupported rather than guessed at.
-	if got, err := ParseURL("https://x.com/notifications/verified"); err == nil {
-		t.Errorf("an unknown notifications tab was accepted as %+v", got)
+	// A tab this cannot read is still unsupported rather than guessed at, and
+	// neither is anything hanging off the one it can: /mentions is the route, so
+	// /mentions/something is not it.
+	for _, raw := range []string{
+		"https://x.com/notifications/verified",
+		"https://x.com/notifications/mentions/extra",
+		"https://x.com/notifications/mentions/1/2",
+	} {
+		if got, err := ParseURL(raw); err == nil {
+			t.Errorf("%q was accepted as %+v", raw, got)
+		}
 	}
 }
 

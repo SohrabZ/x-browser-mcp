@@ -471,8 +471,13 @@ func cameBackEmpty(ctxErr, failed error, reason string) error {
 }
 
 // scrapeNotifications runs the notification script and converts what it finds.
-func scrapeNotifications(page *browser.Page, n int) ([]model.Notification, error) {
-	value, err := page.Rod().Eval(xui.NotificationScript, n)
+//
+// The limit is ignored here on purpose. Capping in the page caps DOM nodes before
+// repeats and empty cells have been discarded, so a page whose first cells repeat
+// would come back short while the rest sat rendered below it. collect applies the
+// cap when it dedupes, where what is counted is notifications.
+func scrapeNotifications(page *browser.Page, _ int) ([]model.Notification, error) {
+	value, err := page.Rod().Eval(xui.NotificationScript)
 	if err != nil {
 		return nil, err
 	}

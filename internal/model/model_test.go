@@ -3,6 +3,7 @@ package model
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func post(id, handle, text string) Post {
@@ -141,5 +142,108 @@ func TestTitledPostIsUsable(t *testing.T) {
 
 	if !p.Usable() {
 		t.Fatal("an article with a title carries content")
+	}
+}
+
+// A notification has no id, so dedupe has to build identity from what the cell
+// said. Building it from too little drops real notifications and reports a short
+// list as though the page held no more.
+func TestDedupeNotificationsKeepsWhatIsActuallyDistinct(t *testing.T) {
+	at := time.Date(2026, 8, 5, 10, 32, 2, 0, time.UTC)
+	actor := Author{Handle: "someone"}
+
+	cases := []struct {
+		name string
+		a, b Notification
+		same bool
+	}{
+		{
+			name: "the same cell read twice",
+			a:    Notification{Text: "someone liked your post", CreatedAt: at, Actors: []Author{actor}},
+			b:    Notification{Text: "someone liked your post", CreatedAt: at, Actors: []Author{actor}},
+			same: true,
+		},
+		{
+			// X timestamps to the millisecond and two in a second is ordinary.
+			name: "same words, different fraction of a second",
+			a:    Notification{Text: "someone liked your post", CreatedAt: at.Add(100 * time.Millisecond)},
+			b:    Notification{Text: "someone liked your post", CreatedAt: at.Add(900 * time.Millisecond)},
+			same: false,
+		},
+		{
+			// Two likes from one account on different posts read identically.
+			name: "same words and time, different post",
+			a:    Notification{Text: "someone liked your post", CreatedAt: at, PostText: "the first post"},
+			b:    Notification{Text: "someone liked your post", CreatedAt: at, PostText: "another post"},
+			same: false,
+		},
+		{
+			name: "no timestamp at all, different posts",
+			a:    Notification{Text: "someone liked your post", PostText: "the first post"},
+			b:    Notification{Text: "someone liked your post", PostText: "another post"},
+			same: false,
+		},
+		{
+			name: "different actors",
+			a:    Notification{Text: "liked your post", CreatedAt: at, Actors: []Author{{Handle: "a"}}},
+			b:    Notification{Text: "liked your post", CreatedAt: at, Actors: []Author{{Handle: "b"}}},
+			same: false,
+		},
+		{
+			// The same pair rendered in either order is one notification.
+			name: "same actors, rendered in the other order",
+			a:    Notification{Text: "both liked your post", CreatedAt: at, Actors: []Author{{Handle: "a"}, {Handle: "b"}}},
+			b:    Notification{Text: "both liked your post", CreatedAt: at, Actors: []Author{{Handle: "b"}, {Handle: "a"}}},
+			same: true,
+		},
+	}
+
+	for _, c := range cases {
+		got := DedupeNotifications([]Notification{c.a, c.b}, 10)
+		want := 1
+		if !c.same {
+			want = 2
+		}
+		if len(got) != want {
+			t.Errorf("%s: kept %d, want %d", c.name, len(got), want)
+		}
+	}
+}
+
+// A cell that said nothing failed to render and is not a notification.
+func TestDedupeNotificationsDropsEmptyCells(t *testing.T) {
+	got := DedupeNotifications([]Notification{
+		{Text: "   "},
+		{Text: "someone followed you"},
+		{Text: ""},
+	}, 10)
+
+	if len(got) != 1 || got[0].Text != "someone followed you" {
+		t.Fatalf("kept %+v, want only the one that said something", got)
+	}
+}
+
+// The cap counts notifications, so repeats before it must not eat into the total.
+func TestDedupeNotificationsFillsUpToTheLimit(t *testing.T) {
+	at := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
+	items := []Notification{
+		{Text: "first", CreatedAt: at},
+		{Text: "first", CreatedAt: at}, // a repeat before the limit is reached
+		{Text: "second", CreatedAt: at.Add(time.Second)},
+		{Text: "third", CreatedAt: at.Add(2 * time.Second)},
+	}
+
+	got := DedupeNotifications(items, 2)
+	if len(got) != 2 {
+		t.Fatalf("kept %d, want 2", len(got))
+	}
+	if got[0].Text != "first" || got[1].Text != "second" {
+		t.Errorf("kept %q and %q, want the first two distinct ones", got[0].Text, got[1].Text)
+	}
+}
+
+func TestDedupeNotificationsRespectsAZeroLimit(t *testing.T) {
+	if got := DedupeNotifications([]Notification{{Text: "a"}}, 0); got != nil {
+		t.Errorf("got %+v, want nothing", got)
 	}
 }

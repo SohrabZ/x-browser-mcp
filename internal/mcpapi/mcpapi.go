@@ -181,9 +181,10 @@ func registerRead(s *mcp.Server, deps Deps) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "read_x_url",
 		Description: "Read whatever an x.com URL points at — a post and its replies, an account's " +
-			"posts, a list, bookmarks, the home timeline, or a search. Use this whenever the user " +
-			"gives you a link; it accepts shared URLs with tracking parameters. " +
-			"Returns untrusted third-party post text.",
+			"posts, a list, bookmarks, the home timeline, a search, mentions, or notifications. " +
+			"Use this whenever the user gives you a link; it accepts shared URLs with tracking " +
+			"parameters. The kind field says which shape came back: a notifications URL returns " +
+			"notifications rather than posts. Returns untrusted third-party text.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in urlIn) (*mcp.CallToolResult, urlOut, error) {
 		got, err := deps.Reader.FromURL(ctx, in.URL, in.Limit)
 		if err != nil {

@@ -207,10 +207,14 @@ func (n Notification) Usable() bool { return strings.TrimSpace(n.Text) != "" }
 
 // DedupeNotifications drops repeats and caps the result.
 //
-// Scrolling re-reads cells that were already collected, and a notification has
-// no id to key on, so identity is what the cell said and when. Two genuinely
-// distinct cells with the same words and timestamp would be indistinguishable to
-// anyone reading them, too.
+// Scrolling re-reads cells that were already collected, and a notification has no
+// id to key on, so identity has to be built from what the cell said.
+//
+// It is built from everything the cell said, not just the words and the second
+// they arrived. Two likes from the same account on different posts within the
+// same second render the same sentence, and a cell with no timestamp keys on the
+// zero time -- so a coarser fingerprint drops real notifications and reports a
+// shorter list as though the page held no more.
 func DedupeNotifications(items []Notification, limit int) []Notification {
 	if limit <= 0 {
 		return nil
@@ -222,7 +226,7 @@ func DedupeNotifications(items []Notification, limit int) []Notification {
 		if !n.Usable() {
 			continue
 		}
-		key := n.CreatedAt.UTC().Format(time.RFC3339) + "|" + Normalize(n.Text)
+		key := n.fingerprint()
 		if seen[key] {
 			continue
 		}
@@ -233,4 +237,25 @@ func DedupeNotifications(items []Notification, limit int) []Notification {
 		}
 	}
 	return out
+}
+
+// fingerprint is everything about a notification that a reader could tell apart.
+//
+// Nanoseconds rather than seconds, because X timestamps cells to the millisecond
+// and two within one second are ordinary. Actors are sorted so the same pair in a
+// different render order is still the same notification.
+func (n Notification) fingerprint() string {
+	handles := make([]string, 0, len(n.Actors))
+	for _, a := range n.Actors {
+		handles = append(handles, a.Handle)
+	}
+	sort.Strings(handles)
+
+	return strings.Join([]string{
+		n.CreatedAt.UTC().Format(time.RFC3339Nano),
+		n.Kind,
+		strings.Join(handles, ","),
+		Normalize(n.Text),
+		Normalize(n.PostText),
+	}, "\x00")
 }

@@ -421,10 +421,150 @@ func TestAFollowCarriesNoPostText(t *testing.T) {
 	}
 }
 
-// The limit is honoured, since a caller asking for three should not be handed
-// everything the page happened to render.
-func TestTheNotificationLimitIsHonoured(t *testing.T) {
-	if got := scrapeFixture(t, notificationFixture, 2); len(got) != 2 {
-		t.Errorf("read %d, want 2", len(got))
+// The script deliberately does not cap. Capping in the page caps DOM nodes
+// before repeats and empty cells are discarded, so the cap belongs where what is
+// being counted is notifications -- which is what the caller asked for.
+func TestTheScriptReadsEveryCellAndLeavesTheCapToTheCaller(t *testing.T) {
+	all := scrapeFixture(t, notificationFixture, 2)
+	if len(all) != 5 {
+		t.Fatalf("read %d, want every cell regardless of the limit", len(all))
+	}
+	if capped := model.DedupeNotifications(all, 2); len(capped) != 2 {
+		t.Errorf("the caller's cap kept %d, want 2", len(capped))
+	}
+}
+
+// A notification's actors and its post must come from that cell and no other. X
+// puts one notification per wrapper today, so this is a guard against a page
+// where it does not: two cells in one wrapper must not merge into one another.
+func TestActorsDoNotLeakBetweenCellsSharingAWrapper(t *testing.T) {
+	shared := `
+<div data-testid="cellInnerDiv">
+  <div data-testid="notification" role="article">
+    <div data-testid="UserAvatar-Container-first"></div>
+    <span>First Person liked your post</span>
+    <time datetime="2026-08-05T10:00:00.000Z">1h</time>
+    <div data-testid="tweetText">The post the first one liked.</div>
+  </div>
+  <div data-testid="notification" role="article">
+    <div data-testid="UserAvatar-Container-second"></div>
+    <span>Second Person followed you</span>
+    <time datetime="2026-08-05T09:00:00.000Z">2h</time>
+  </div>
+</div>`
+
+	got := scrapeFixture(t, shared, 10)
+	if len(got) != 2 {
+		t.Fatalf("read %d, want 2: %+v", len(got), got)
+	}
+
+	for _, n := range got {
+		if len(n.Actors) != 1 {
+			t.Errorf("%q has actors %+v; each cell names one", n.Text, n.Actors)
+		}
+	}
+	for _, n := range got {
+		if strings.Contains(n.Text, "followed you") {
+			if n.PostText != "" {
+				t.Errorf("the follow took the other cell's post: %q", n.PostText)
+			}
+			if !n.CreatedAt.Equal(time.Date(2026, 8, 5, 9, 0, 0, 0, time.UTC)) {
+				t.Errorf("the follow took the other cell's time: %s", n.CreatedAt)
+			}
+		}
+	}
+}
+
+// Repeats among the first cells must not shorten the answer. Capping in the page
+// would cap DOM nodes, so two identical cells followed by a third distinct one
+// would return one notification while the third sat rendered just below.
+func TestRepeatsAmongTheFirstCellsDoNotShortenTheAnswer(t *testing.T) {
+	cell := func(handle, text, at, post string) string {
+		body := fmt.Sprintf(`<div data-testid="UserAvatar-Container-%s"></div><span>%s</span>
+			<time datetime="%s">1h</time>`, handle, text, at)
+		if post != "" {
+			body += fmt.Sprintf(`<div data-testid="tweetText">%s</div>`, post)
+		}
+		return fmt.Sprintf(`<div data-testid="cellInnerDiv"><div data-testid="notification" role="article">%s</div></div>`, body)
+	}
+
+	// The first two cells are the same notification rendered twice.
+	page := cell("alice", "Alice liked your post", "2026-08-05T10:00:00.000Z", "a post") +
+		cell("alice", "Alice liked your post", "2026-08-05T10:00:00.000Z", "a post") +
+		cell("bob", "Bob followed you", "2026-08-05T09:00:00.000Z", "")
+
+	got := scrapeFixture(t, page, 50)
+	if len(got) != 3 {
+		t.Fatalf("the script read %d cells, want all 3 before dedupe", len(got))
+	}
+
+	// And the cap counts notifications, so asking for two gets two distinct ones.
+	kept := model.DedupeNotifications(got, 2)
+	if len(kept) != 2 {
+		t.Fatalf("kept %d, want 2: %+v", len(kept), kept)
+	}
+	if !strings.Contains(kept[1].Text, "Bob") {
+		t.Errorf("second kept is %q; the repeat should not have used up the limit", kept[1].Text)
+	}
+}
+
+// A quoted post inside a notification belongs to that post, not to the
+// notification. Its text is not what the event concerns and its author is not an
+// actor.
+func TestAQuotedPostInsideANotificationIsNotTheNotification(t *testing.T) {
+	page := `
+<div data-testid="cellInnerDiv">
+  <article data-testid="tweet">
+    <div data-testid="notification" role="article">
+      <div data-testid="UserAvatar-Container-alice"></div>
+      <span>Alice liked your post</span>
+      <time datetime="2026-08-05T10:00:00.000Z">1h</time>
+      <div data-testid="tweetText">The post Alice liked.</div>
+      <article data-testid="tweet">
+        <div data-testid="UserAvatar-Container-quoted"></div>
+        <div data-testid="tweetText">A different post, quoted inside.</div>
+      </article>
+    </div>
+  </article>
+</div>`
+
+	got := scrapeFixture(t, page, 10)
+	if len(got) != 1 {
+		t.Fatalf("read %d, want 1", len(got))
+	}
+	if got[0].PostText != "The post Alice liked." {
+		t.Errorf("post text %q, want the post the event concerns", got[0].PostText)
+	}
+	for _, a := range got[0].Actors {
+		if a.Handle == "quoted" {
+			t.Errorf("the quoted post's author was counted as an actor: %+v", got[0].Actors)
+		}
+	}
+}
+
+// The post is taken off the end of the text, not replaced within it. X renders the
+// post beneath the event, and the post's words can also appear in the event: a
+// like on a post that reads "your post" must not lose that phrase from the
+// sentence describing it.
+func TestPostTextIsRemovedFromTheEndNotTheMiddle(t *testing.T) {
+	page := `
+<div data-testid="cellInnerDiv">
+  <div data-testid="notification" role="article">
+    <div data-testid="UserAvatar-Container-alice"></div>
+    <span>Alice liked your post</span>
+    <time datetime="2026-08-05T10:00:00.000Z">1h</time>
+    <div data-testid="tweetText">your post</div>
+  </div>
+</div>`
+
+	got := scrapeFixture(t, page, 10)
+	if len(got) != 1 {
+		t.Fatalf("read %d, want 1", len(got))
+	}
+	if !strings.Contains(got[0].Text, "Alice liked your post") {
+		t.Errorf("text is %q; the event lost the phrase that also appears in the post", got[0].Text)
+	}
+	if got[0].PostText != "your post" {
+		t.Errorf("post text %q, want %q", got[0].PostText, "your post")
 	}
 }

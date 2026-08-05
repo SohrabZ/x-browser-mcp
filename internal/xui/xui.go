@@ -135,7 +135,13 @@ type RawNotification struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// NotificationScript reads the notification cells currently rendered.
+// NotificationScript reads every notification cell currently rendered.
+//
+// It takes no limit and applies none. Capping here would cap DOM nodes before
+// anything has been deduplicated or discarded, so a page whose first cells repeat
+// would return fewer than asked for while the rest sat rendered just below. The
+// cap belongs after conversion, where what is counted is notifications rather
+// than elements.
 //
 // This exists because the notifications timeline is not a timeline of posts. Of
 // eighteen cells on a real account, one was a post and sixteen were cells with
@@ -151,7 +157,7 @@ type RawNotification struct {
 // Kind is read from those words and is empty when none match. X distinguishes a
 // like from a follow with an icon carrying no identifier, so there is nothing
 // language-independent to read; Text still says what happened.
-const NotificationScript = `limit => {
+const NotificationScript = `() => {
   const kindOf = text => {
     const t = text.toLowerCase();
     if (t.includes('followed you')) return 'follow';
@@ -164,18 +170,38 @@ const NotificationScript = `limit => {
   };
 
   return Array.from(document.querySelectorAll('[data-testid="notification"]'))
-    .slice(0, limit)
     .map(cell => {
-      const wrap = cell.closest('[data-testid="cellInnerDiv"]') || cell;
-      const post = wrap.querySelector('[data-testid="tweetText"]');
+      // Everything is read from this cell and nowhere else. Widening to the
+      // surrounding wrapper when a cell holds nothing looks harmless and is not:
+      // a follow has no post, so the wrapper hands it the neighbouring cell's,
+      // and the notification then reports a post it has nothing to do with.
+      // Absent has to stay absent -- there is no way to tell "X moved this out of
+      // the cell" from "this cell does not have one", and guessing wrong invents
+      // content rather than losing it.
+      //
+      // A quoted post is excluded the same way ControlScript excludes one: by
+      // ownership. Anything inside a nested article belongs to that post, not to
+      // this notification, so its text and its author are not this cell's.
+      const within = (sel) => Array.from(cell.querySelectorAll(sel))
+        .filter(e => e.closest('article') === cell.closest('article'));
+
+      const post = within('[data-testid="tweetText"]')[0] || null;
 
       // The words X wrote, without the post it quotes underneath -- that is
       // reported separately rather than run together with the event.
+      //
+      // Taken off the end, not replaced: X renders the post beneath the event, and
+      // the post's words can also occur in the event itself. "Alice liked your
+      // post" over a post reading "your post" would otherwise lose the phrase from
+      // the sentence and keep it in the quote.
       const postText = post ? post.innerText : '';
       let text = cell.innerText || '';
-      if (postText && text.includes(postText)) text = text.replace(postText, '');
+      if (postText) {
+        const at = text.lastIndexOf(postText);
+        if (at !== -1) text = text.slice(0, at) + text.slice(at + postText.length);
+      }
 
-      const handles = Array.from(wrap.querySelectorAll('[data-testid^="UserAvatar-Container-"]'))
+      const handles = within('[data-testid^="UserAvatar-Container-"]')
         .map(e => e.getAttribute('data-testid').replace('UserAvatar-Container-', ''))
         .filter(Boolean);
 
@@ -184,7 +210,7 @@ const NotificationScript = `limit => {
         handles: Array.from(new Set(handles)),
         text: text,
         post_text: postText,
-        created_at: (wrap.querySelector('time') || {}).dateTime || '',
+        created_at: (within('time')[0] || {}).dateTime || '',
       };
     });
 }`

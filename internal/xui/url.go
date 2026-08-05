@@ -95,7 +95,7 @@ func ParseURL(raw string) (Target, error) {
 		// /notifications is the "All" tab and /notifications/mentions the one
 		// that holds posts. They read differently, so they are separate targets
 		// rather than one with a flag.
-		case segments[0] == "notifications" && len(segments) >= 2 && segments[1] == "mentions":
+		case segments[0] == "notifications" && len(segments) == 2 && segments[1] == "mentions":
 			return Target{Kind: TargetMentions}, nil
 		case segments[0] == "notifications" && len(segments) == 1:
 			return Target{Kind: TargetNotifications}, nil
