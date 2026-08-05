@@ -132,20 +132,51 @@ const (
 // The press is a DOM click rather than a synthesized mouse event, because X
 // ignores those on these controls: the page accepts the event, reports nothing
 // wrong, and makes no request.
+//
+// Only what a post renders itself counts, for both halves of that. X nests a
+// quoted post's article inside the quoting one, so a plain subtree search
+// reaches links and controls belonging to a different post -- which would let a
+// quoted post's status link decide the match, and let its like button be the one
+// pressed.
 const ControlScript = `(postID, selector, press) => {
   const posts = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
   if (posts.length === 0) return 'no-post';
 
-  const owns = post => Array.from(post.querySelectorAll('a[href*="/status/"]')).some(link => {
+  const own = (post, sel) =>
+    Array.from(post.querySelectorAll(sel)).filter(el => el.closest('article') === post);
+
+  const owns = post => own(post, 'a[href*="/status/"]').some(link => {
     const m = /\/status\/(\d+)/.exec(link.getAttribute('href') || '');
     return m !== null && m[1] === postID;
   });
 
-  const control = (posts.find(owns) || posts[0]).querySelector(selector);
-  if (control === null) return 'no-control';
-  if (press) control.click();
+  const controls = own(posts.find(owns) || posts[0], selector);
+  if (controls.length === 0) return 'no-control';
+  if (press) controls[0].click();
   return 'ok';
 }`
+
+// ValidPostID reports whether id has the shape X gives a post: digits, and
+// nothing else.
+//
+// Everything downstream leans on that. It goes into a URL unescaped, and
+// ControlScript matches it against the digits in a status link -- which anything
+// else can never match, so an id of the wrong shape would quietly fall back to
+// the first post on the page rather than fail.
+func ValidPostID(id string) bool {
+	if id == "" || len(id) > maxPostIDDigits {
+		return false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// maxPostIDDigits is well clear of the 19 digits a 64-bit snowflake id needs.
+const maxPostIDDigits = 25
 
 // SignedInCookies reports whether the browser holds the pair of cookies X sets
 // for an authenticated session.

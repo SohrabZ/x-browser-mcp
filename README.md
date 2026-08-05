@@ -257,6 +257,7 @@ act as you.
 | `-allow-writes`   | `false`             | enable write tools                   |
 | `-fetch-timeout`  | `45s`               | budget for one read                  |
 | `-login-timeout`  | `5m`                | how long a login window stays open   |
+| `-write-timeout`  | `2m`                | budget for one write, incl. confirming it |
 | `-browser-idle`   | `3m`                | how long a browser stays warm (0 = off) |
 | `-read-interval`  | `3s`                | minimum gap between live reads       |
 | `-read-window`    | `10m`               | rolling window for the read budget   |

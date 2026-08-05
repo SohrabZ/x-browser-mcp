@@ -104,15 +104,13 @@ func (w *Writer) Post(ctx context.Context, text, confirm string) error {
 
 // Reply posts a response to an existing post.
 func (w *Writer) Reply(ctx context.Context, handle, postID, text, confirm string) error {
-	h := xui.NormalizeHandle(handle)
-	if h == "" || postID == "" {
-		return errors.New("handle and post id are required")
-	}
 	if err := ValidateText(text); err != nil {
 		return err
 	}
-
-	target := xui.PostURL(h, postID)
+	target, err := postTarget(handle, postID)
+	if err != nil {
+		return err
+	}
 	return w.do(ctx, Record{Action: ActionReply, Target: target, Excerpt: text}, confirm, func(p *browser.Page) error {
 		if err := p.Goto(target); err != nil {
 			return err
@@ -129,12 +127,10 @@ func (w *Writer) Like(ctx context.Context, handle, postID, confirm string) error
 // Repost reposts a post. X asks for confirmation in a menu, so the confirm item
 // is clicked when it appears.
 func (w *Writer) Repost(ctx context.Context, handle, postID, confirm string) error {
-	h := xui.NormalizeHandle(handle)
-	if h == "" || postID == "" {
-		return errors.New("handle and post id are required")
+	target, err := postTarget(handle, postID)
+	if err != nil {
+		return err
 	}
-	target := xui.PostURL(h, postID)
-
 	return w.do(ctx, Record{Action: ActionRepost, Target: target}, confirm, func(p *browser.Page) error {
 		if err := p.Goto(target); err != nil {
 			return err
@@ -178,12 +174,10 @@ func (w *Writer) Bookmark(ctx context.Context, handle, postID, confirm string) e
 // again, so re-liking an already-liked post does not silently un-like it; and it
 // is what every check below reads, so it is required rather than optional.
 func (w *Writer) tap(ctx context.Context, action, handle, postID, confirm, button, alreadyDone string) error {
-	h := xui.NormalizeHandle(handle)
-	if h == "" || postID == "" {
-		return errors.New("handle and post id are required")
+	target, err := postTarget(handle, postID)
+	if err != nil {
+		return err
 	}
-	target := xui.PostURL(h, postID)
-
 	return w.do(ctx, Record{Action: action, Target: target}, confirm, func(p *browser.Page) error {
 		if err := p.Goto(target); err != nil {
 			return err
@@ -220,6 +214,24 @@ func (w *Writer) tap(ctx context.Context, action, handle, postID, confirm, butto
 	})
 }
 
+// postTarget validates the pair every action against an existing post needs,
+// and returns that post's address.
+//
+// The id is checked for shape rather than only for emptiness because the page
+// script matches it against the digits in a status link: an id of any other
+// shape cannot match, and would quietly settle for the first post on the page
+// instead of failing.
+func postTarget(handle, postID string) (string, error) {
+	h := xui.NormalizeHandle(handle)
+	if h == "" {
+		return "", errors.New("handle is required")
+	}
+	if !xui.ValidPostID(postID) {
+		return "", fmt.Errorf("post id must be the digits X gives a post, got %q", postID)
+	}
+	return xui.PostURL(h, postID), nil
+}
+
 // confirmApplied reloads the post and checks the action survived, which is the
 // only check that distinguishes what X has recorded from what its page is
 // merely showing.
@@ -254,25 +266,32 @@ const appliedWait = 2 * time.Second
 // enables Chrome's Network domain and subscribes to its events, and only the wait
 // releases them. So it is safe to defer and to call again, and the second call
 // does nothing.
-func settle(p *browser.Page) func() {
+// The wait reports whether the page did go quiet, so a caller with nothing else
+// to check on can say so rather than treat giving up as success.
+func settle(p *browser.Page) func() bool {
 	idle := p.Rod().WaitRequestIdle(requestQuiet, nil, nil, nil)
 
-	var once sync.Once
-	return func() {
+	var (
+		once  sync.Once
+		quiet bool
+	)
+	return func() bool {
 		once.Do(func() {
-			quiet := make(chan struct{})
+			done := make(chan struct{})
 			// rod's wait takes the page's context and no deadline of its own, so
 			// the bound is here rather than on the watch -- and it has to start
 			// now rather than when the watch opened, since the wait for the
 			// control to flip happens in between. A wait abandoned this way ends
 			// with the page, which is the end of this write.
-			go func() { defer close(quiet); idle() }()
+			go func() { defer close(done); idle() }()
 
 			select {
-			case <-quiet:
+			case <-done:
+				quiet = true
 			case <-time.After(settleWait):
 			}
 		})
+		return quiet
 	}
 }
 
@@ -450,7 +469,14 @@ func compose(p *browser.Page, text string) error {
 	if err := click(p, xui.SelComposeButton); err != nil {
 		return err
 	}
-	settled()
+	if !settled() {
+		// Not treated as a failure: X had accepted the text and the submit went
+		// through, and refusing a post over a page that would not go quiet would
+		// be its own kind of wrong answer. But it is the one write with nothing
+		// to reload and confirm, so the doubt is worth recording.
+		slog.Warn("the page never went quiet after submitting; the post may not have been sent",
+			"waited", settleWait)
+	}
 	return nil
 }
 
@@ -511,18 +537,20 @@ func pressOnPost(p *browser.Page, postID, selector string, budget time.Duration)
 	deadline := time.Now().Add(budget)
 	for {
 		state, err := onPost(p, postID, selector, true)
-		if err == nil && state == controlFound {
+		// An ask that failed leaves it unknown whether the click landed, and
+		// these controls toggle -- pressing again to find out could undo the
+		// thing it was meant to do. Report it instead of retrying.
+		if err != nil {
+			return fmt.Errorf("press %s: %w", selector, err)
+		}
+		if state == controlFound {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			switch {
-			case err != nil:
-				return fmt.Errorf("press %s: %w", selector, err)
-			case state == noPost:
+			if state == noPost {
 				return fmt.Errorf("press %s: X rendered no post to press it on", selector)
-			default:
-				return fmt.Errorf("press %s: the post does not offer that control", selector)
 			}
+			return fmt.Errorf("press %s: the post does not offer that control", selector)
 		}
 		time.Sleep(pollInterval)
 	}
@@ -550,12 +578,21 @@ func hasOnPost(p *browser.Page, postID, selector string, budget time.Duration) b
 
 // onPost runs the shared lookup behind pressOnPost and hasOnPost.
 func onPost(p *browser.Page, postID, selector string, press bool) (string, error) {
-	res, err := p.Rod().Eval(xui.ControlScript, postID, selector, press)
+	// Bound the ask. rod retries a JS context that has gone away -- a frame
+	// reloading underneath it -- against the page's own context, so an unbounded
+	// one would outlast the ceiling the caller set and spend the write's budget.
+	timed := p.Rod().Timeout(evalWait)
+	defer timed.CancelTimeout()
+
+	res, err := timed.Eval(xui.ControlScript, postID, selector, press)
 	if err != nil {
 		return "", err
 	}
 	return res.Value.String(), nil
 }
+
+// evalWait bounds a single ask of the page.
+const evalWait = 5 * time.Second
 
 // What ControlScript reports back. Finding the control and pressing it share a
 // value, since one that could be pressed was by definition found.

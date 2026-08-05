@@ -442,3 +442,80 @@ func pressed(t *testing.T, p *browser.Page) string {
 	}
 	return res.Value.String()
 }
+
+// X nests a quoted post's article inside the quoting one. A subtree search
+// therefore reaches a control that belongs to the quoted post -- so liking a
+// post that quotes another could have liked the one it quotes.
+func TestAQuotedPostsControlsAreNotThePostsOwn(t *testing.T) {
+	p, done := postPage(t, `
+		<article data-testid="tweet" id="wanted">
+			<a href="/someone/status/222">2h</a>
+			<div data-testid="like" onclick="press('wanted')">like</div>
+			<article data-testid="tweet" id="quoted">
+				<a href="/other/status/999">1d</a>
+				<div data-testid="unlike" onclick="press('quoted')">liked already</div>
+			</article>
+		</article>`)
+	defer done()
+
+	// The quoted post is liked; the post itself is not.
+	if hasOnPost(p, "222", xui.SelUnlikeButton, 200*time.Millisecond) {
+		t.Error("read the quoted post's like as the quoting post's")
+	}
+	if err := pressOnPost(p, "222", xui.SelLikeButton, time.Second); err != nil {
+		t.Fatalf("press: %v", err)
+	}
+	if got := pressed(t, p); got != "wanted" {
+		t.Errorf("pressed %q, want the quoting post", got)
+	}
+}
+
+// And a quoted post's status link does not let it answer for the post either;
+// otherwise a reply quoting the post being acted on could claim its id.
+func TestAQuotedStatusLinkDoesNotClaimThePost(t *testing.T) {
+	p, done := postPage(t, `
+		<article data-testid="tweet" id="wanted">
+			<a href="/someone/status/222">2h</a>
+			<div data-testid="like" onclick="press('wanted')">like</div>
+		</article>
+		<article data-testid="tweet" id="reply">
+			<a href="/other/status/333">3h</a>
+			<div data-testid="like" onclick="press('reply')">like</div>
+			<article data-testid="tweet" id="requoted">
+				<a href="/someone/status/222">2h</a>
+			</article>
+		</article>`)
+	defer done()
+
+	if err := pressOnPost(p, "222", xui.SelLikeButton, time.Second); err != nil {
+		t.Fatalf("press: %v", err)
+	}
+	if got := pressed(t, p); got != "wanted" {
+		t.Errorf("pressed %q; a reply quoting the post must not answer for it", got)
+	}
+}
+
+// An id of any other shape can never match the digits in a status link, so it
+// would have fallen through to the first post on the page rather than failing.
+// It is refused before a browser is ever opened.
+func TestAnIDThatIsNotAPostIDIsRefused(t *testing.T) {
+	for _, id := range []string{"", "  ", "abc", "222?s=20", "222/photo/1", "-1", "1e9", "22 2"} {
+		if _, err := postTarget("someone", id); err == nil {
+			t.Errorf("post id %q was accepted", id)
+		}
+	}
+	target, err := postTarget("@Someone", "1234567890123456789")
+	if err != nil {
+		t.Fatalf("a real post id was refused: %v", err)
+	}
+	if want := "https://x.com/Someone/status/1234567890123456789"; target != want {
+		t.Errorf("target %q, want %q", target, want)
+	}
+}
+
+// A handle is still required, and says so on its own rather than blaming the id.
+func TestAMissingHandleIsRefused(t *testing.T) {
+	if _, err := postTarget("  ", "222"); err == nil {
+		t.Error("an empty handle was accepted")
+	}
+}

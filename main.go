@@ -44,6 +44,7 @@ func run() error {
 	flag.BoolVar(&cfg.AllowWrites, "allow-writes", cfg.AllowWrites, "enable the write tools (post, reply, like, repost, bookmark)")
 	flag.DurationVar(&cfg.FetchTimeout, "fetch-timeout", cfg.FetchTimeout, "time budget for a single read")
 	flag.DurationVar(&cfg.LoginTimeout, "login-timeout", cfg.LoginTimeout, "how long an interactive login may stay open")
+	flag.DurationVar(&cfg.WriteTimeout, "write-timeout", cfg.WriteTimeout, "time budget for a single write, including confirming it took effect")
 	flag.DurationVar(&cfg.BrowserIdle, "browser-idle", cfg.BrowserIdle, "how long a browser stays warm between reads (0 disables warming)")
 
 	// Pacing is exposed because the right values depend on how hard you drive
@@ -136,7 +137,7 @@ func run() error {
 		Budget:  limit.New(pace(cfg.WritePace)),
 		Audit:   write.NewAuditor(cfg.AuditLogPath()),
 		Reserve: browsers,
-		Timeout: cfg.FetchTimeout,
+		Timeout: cfg.WriteTimeout,
 
 		// A successful write changes what the next read should return.
 		OnChange: reader.Invalidate,

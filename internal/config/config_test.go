@@ -121,6 +121,7 @@ func TestValidateRejectsBadConfig(t *testing.T) {
 		"no chrome":          func(c *Config) { c.ChromePath = "  " },
 		"zero fetch":         func(c *Config) { c.FetchTimeout = 0 },
 		"zero login":         func(c *Config) { c.LoginTimeout = 0 },
+		"zero write":         func(c *Config) { c.WriteTimeout = 0 },
 		"empty read budget":  func(c *Config) { c.ReadPace.Max = 0 },
 		"empty write window": func(c *Config) { c.WritePace.Window = 0 },
 	}
@@ -195,6 +196,14 @@ func TestDefaultTimeoutsAreSane(t *testing.T) {
 	}
 	if cfg.LoginTimeout < time.Minute {
 		t.Errorf("login timeout %s leaves no time to type credentials", cfg.LoginTimeout)
+	}
+	// A write starts its own browser, presses a control, waits for X's request,
+	// and reloads the post to confirm the action survived. Each of those waits
+	// has a bound of its own, and the deadline has to outlast their sum or it
+	// truncates the confirmation and reports a timeout instead of a verdict.
+	if cfg.WriteTimeout <= cfg.FetchTimeout {
+		t.Errorf("write timeout %s does not allow for more than a read (%s), but a write verifies itself",
+			cfg.WriteTimeout, cfg.FetchTimeout)
 	}
 }
 
