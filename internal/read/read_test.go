@@ -3,6 +3,7 @@ package read
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,6 +171,38 @@ func TestAReadThatBrokeIsNotReportedAsEmpty(t *testing.T) {
 		}
 		if c.wantErr != nil && !errors.Is(got, c.wantErr) {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.wantErr)
+		}
+	}
+}
+
+// Callers paste links, so a link this cannot read is the most likely mistake
+// they will make and the one most worth being told about. Every way ParseURL
+// fails is the URL being wrong, and an unclassified error would reach them as
+// "internal error" -- which is what this whole classification exists to stop.
+func TestABadURLIsTheCallersMistakeNotAFault(t *testing.T) {
+	r := New(Options{})
+
+	for _, raw := range []string{
+		"",
+		"not a url at all",
+		"https://example.com/someone/status/222",
+		"https://x.com/search",
+		"https://x.com/i/lists/",
+	} {
+		_, _, err := r.FromURL(context.Background(), raw, 5)
+		if err == nil {
+			t.Errorf("%q was accepted", raw)
+			continue
+		}
+
+		var badInput *InvalidError
+		if !errors.As(err, &badInput) {
+			t.Errorf("%q: got %T (%v), want an InvalidError", raw, err, err)
+			continue
+		}
+		// And it still says which URL, because that is the caller's own input.
+		if raw != "" && !strings.Contains(err.Error(), raw) {
+			t.Errorf("%q: message %q does not name the URL", raw, err)
 		}
 	}
 }

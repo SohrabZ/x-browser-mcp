@@ -177,7 +177,11 @@ func (r *Reader) List(ctx context.Context, listID string, n int) (Result, error)
 func (r *Reader) FromURL(ctx context.Context, raw string, n int) (Result, model.Thread, error) {
 	target, err := xui.ParseURL(raw)
 	if err != nil {
-		return Result{}, model.Thread{}, err
+		// Every way this fails is the caller's URL being wrong -- not an x.com
+		// link, no post id in it, a search with no query. Saying so is the whole
+		// use of this entry point, since callers paste links rather than assemble
+		// handle and id pairs, and an unclassified error would say nothing at all.
+		return Result{}, model.Thread{}, invalid("%s", err)
 	}
 
 	switch target.Kind {
