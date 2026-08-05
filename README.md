@@ -27,7 +27,7 @@ Agent ──MCP──▶ x-browser-mcp ──CDP──▶ Chrome (your profile) 
 One command, no clone:
 
 ```bash
-go install github.com/SohrabZ/x-browser-mcp@v0.0.1
+go install github.com/SohrabZ/x-browser-mcp@v0.0.2
 ```
 
 Requires [Go 1.25+](https://go.dev/dl/). The binary lands in `$(go env GOPATH)/bin`
@@ -114,7 +114,7 @@ Everything is available over both MCP and a plain HTTP API.
 ## Quick start
 
 ```bash
-go install github.com/SohrabZ/x-browser-mcp@latest
+go install github.com/SohrabZ/x-browser-mcp@v0.0.2
 x-browser-mcp
 ```
 

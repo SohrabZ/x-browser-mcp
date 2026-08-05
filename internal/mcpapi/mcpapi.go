@@ -32,7 +32,7 @@ type Deps struct {
 func Server(deps Deps) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "x-browser-mcp",
-		Version: "0.0.1",
+		Version: "0.0.2",
 	}, nil)
 
 	registerRead(s, deps)
