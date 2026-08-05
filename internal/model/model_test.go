@@ -26,6 +26,28 @@ func TestUsableRejectsPartialPosts(t *testing.T) {
 	}
 }
 
+// Image-only posts are how visual self-threads are published. Requiring text
+// silently dropped every one of them, so a ten-post thread read as empty.
+func TestImageOnlyPostIsUsable(t *testing.T) {
+	p := Post{
+		ID:     "1",
+		Author: Author{Handle: "a"},
+		Media:  []Media{{URL: "https://pbs.twimg.com/media/abc.jpg"}},
+	}
+
+	if !p.Usable() {
+		t.Fatal("a post carrying only an image is complete content")
+	}
+}
+
+func TestPostWithNeitherTextNorMediaIsUnusable(t *testing.T) {
+	p := Post{ID: "1", Author: Author{Handle: "a"}}
+
+	if p.Usable() {
+		t.Fatal("a post with no text and no media carries nothing")
+	}
+}
+
 func TestDedupeKeepsFirstOccurrenceInOrder(t *testing.T) {
 	got := Dedupe([]Post{
 		post("1", "a", "one"),

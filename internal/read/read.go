@@ -32,10 +32,20 @@ type Query struct {
 
 // Limits on how much a single call may ask for.
 const (
-	DefaultLimit  = 8
-	MaxLimit      = 50
+	DefaultLimit = 8
+	MaxLimit     = 50
+
 	maxScrolls    = 12
 	settleTimeout = 20 * time.Second
+	scrollPause   = 1200 * time.Millisecond
+
+	// stallRounds is how many scrolls may return nothing new before a timeline
+	// is treated as exhausted.
+	//
+	// Lazily rendered entries can miss the first round, so this is not 1. It is
+	// kept small on purpose: waiting longer does not make X return replies it
+	// has decided not to render, it only makes every short page slow.
+	stallRounds = 3
 )
 
 // ClampLimit brings a caller-supplied limit into range.
@@ -264,8 +274,8 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 			}
 		}
 
-		// Two rounds with nothing new means the timeline has given what it has.
-		if stalled >= 2 && len(gathered) > 0 {
+		// Repeated empty rounds mean the timeline has given what it has.
+		if stalled >= stallRounds && len(gathered) > 0 {
 			return gathered, nil
 		}
 		if time.Now().After(deadline) {
@@ -275,7 +285,7 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 		if _, err := page.Rod().Eval(xui.ScrollScript); err != nil {
 			break
 		}
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(scrollPause)
 	}
 
 	if len(gathered) == 0 {

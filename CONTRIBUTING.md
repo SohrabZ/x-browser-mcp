@@ -37,7 +37,8 @@ A one-liner:
 go build ./... && go vet ./... && test -z "$(gofmt -l .)" && go test ./...
 ```
 
-CI runs exactly these four gates.
+CI runs exactly these four gates. For the manual browser and MCP-client passes,
+see [TESTING.md](TESTING.md).
 
 ## Coding guidelines
 

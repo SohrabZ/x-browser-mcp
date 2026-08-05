@@ -32,7 +32,7 @@ type Deps struct {
 func Server(deps Deps) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "x-browser-mcp",
-		Version: "0.0.2",
+		Version: "0.0.3",
 	}, nil)
 
 	registerRead(s, deps)
@@ -297,9 +297,37 @@ func renderPosts(title string, res read.Result) string {
 	fmt.Fprintf(&b, " — %d posts\n\n", len(res.Posts))
 
 	for _, p := range res.Posts {
-		fmt.Fprintf(&b, "@%s: %s\n  %s\n", p.Author.Handle, model.Excerpt(p.Text, 240), p.URL)
+		fmt.Fprintf(&b, "@%s: %s\n  %s\n", p.Author.Handle, describe(p, 240), p.URL)
 	}
 	return b.String()
+}
+
+// describe renders a post's content, falling back to its media when it has no
+// text. Rendering an image-only post as an empty string tells a model nothing;
+// naming the images at least says something is there.
+func describe(p model.Post, maxRunes int) string {
+	text := model.Excerpt(p.Text, maxRunes)
+	if len(p.Media) == 0 {
+		return text
+	}
+
+	labels := make([]string, 0, len(p.Media))
+	for _, m := range p.Media {
+		if m.Alt != "" {
+			labels = append(labels, m.Alt)
+		}
+	}
+
+	note := fmt.Sprintf("[%d image(s)", len(p.Media))
+	if len(labels) > 0 {
+		note += ": " + model.Excerpt(strings.Join(labels, "; "), 120)
+	}
+	note += "]"
+
+	if text == "" {
+		return note
+	}
+	return text + " " + note
 }
 
 func renderThread(thread model.Thread) string {
@@ -310,7 +338,7 @@ func renderThread(thread model.Thread) string {
 	if len(thread.Replies) > 0 {
 		fmt.Fprintf(&b, "%d replies:\n", len(thread.Replies))
 		for _, r := range thread.Replies {
-			fmt.Fprintf(&b, "  @%s: %s\n", r.Author.Handle, model.Excerpt(r.Text, 200))
+			fmt.Fprintf(&b, "  @%s: %s\n", r.Author.Handle, describe(r, 200))
 		}
 	}
 	return b.String()

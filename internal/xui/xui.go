@@ -141,14 +141,21 @@ func OnLoginWall(currentURL string) bool {
 // RawPost is a post as scraped from the DOM, before validation. It matches the
 // shape returned by ExtractScript.
 type RawPost struct {
-	Href      string `json:"href"`
-	Text      string `json:"text"`
-	CreatedAt string `json:"created_at"`
-	Handle    string `json:"handle"`
-	Name      string `json:"name"`
-	Replies   int    `json:"replies"`
-	Reposts   int    `json:"reposts"`
-	Likes     int    `json:"likes"`
+	Href      string     `json:"href"`
+	Text      string     `json:"text"`
+	CreatedAt string     `json:"created_at"`
+	Handle    string     `json:"handle"`
+	Name      string     `json:"name"`
+	Replies   int        `json:"replies"`
+	Reposts   int        `json:"reposts"`
+	Likes     int        `json:"likes"`
+	Media     []RawMedia `json:"media"`
+}
+
+// RawMedia is an image as scraped from the DOM.
+type RawMedia struct {
+	URL string `json:"url"`
+	Alt string `json:"alt"`
 }
 
 // ToPost converts a scraped post into a domain post, reporting whether it was
@@ -158,7 +165,16 @@ func (r RawPost) ToPost() (model.Post, bool) {
 	id := PostIDFromHref(r.Href)
 	text := model.Normalize(r.Text)
 
-	if handle == "" || id == "" || text == "" {
+	media := make([]model.Media, 0, len(r.Media))
+	for _, m := range r.Media {
+		if url := strings.TrimSpace(m.URL); url != "" {
+			media = append(media, model.Media{URL: url, Alt: strings.TrimSpace(m.Alt)})
+		}
+	}
+
+	// Text is deliberately not required. Image-only posts are how visual
+	// self-threads are published, and demanding text dropped them entirely.
+	if handle == "" || id == "" || (text == "" && len(media) == 0) {
 		return model.Post{}, false
 	}
 
@@ -172,6 +188,9 @@ func (r RawPost) ToPost() (model.Post, bool) {
 			Reposts: r.Reposts,
 			Likes:   r.Likes,
 		},
+	}
+	if len(media) > 0 {
+		post.Media = media
 	}
 	if r.CreatedAt != "" {
 		if at, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil {
@@ -219,6 +238,14 @@ const ExtractScript = `limit => {
       : [];
     const handle = spans.find(s => s.startsWith('@')) || '';
 
+    // Many posts carry only images. Avatars and emoji live outside
+    // tweetPhoto/card wrappers, so scoping to those keeps them out.
+    const media = Array.from(
+      article.querySelectorAll('[data-testid="tweetPhoto"] img, [data-testid="card.wrapper"] img')
+    )
+      .map(img => ({ url: img.getAttribute('src') || '', alt: img.getAttribute('alt') || '' }))
+      .filter(m => m.url && !m.url.includes('profile_images') && !m.url.includes('/emoji/'));
+
     return {
       href: link ? (link.getAttribute('href') || '') : '',
       text: article.querySelector('[data-testid="tweetText"]')?.innerText || '',
@@ -227,7 +254,8 @@ const ExtractScript = `limit => {
       name: spans.find(s => !s.startsWith('@')) || handle.replace(/^@/, ''),
       replies: count(article.querySelector('[data-testid="reply"]')),
       reposts: count(article.querySelector('[data-testid="retweet"], [data-testid="unretweet"]')),
-      likes: count(article.querySelector('[data-testid="like"], [data-testid="unlike"]'))
+      likes: count(article.querySelector('[data-testid="like"], [data-testid="unlike"]')),
+      media
     };
   });
 }`

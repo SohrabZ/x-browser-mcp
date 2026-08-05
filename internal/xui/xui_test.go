@@ -157,6 +157,55 @@ func TestRawPostRejectsIncomplete(t *testing.T) {
 	}
 }
 
+// A self-thread of images is a real and common shape: ten replies, none with
+// any text. Requiring text discarded all of them and the thread read as empty.
+func TestImageOnlyPostConverts(t *testing.T) {
+	raw := RawPost{
+		Href:   "/LogoDiffusion/status/2076415564449190235",
+		Handle: "@LogoDiffusion",
+		Media:  []RawMedia{{URL: "https://pbs.twimg.com/media/abc.jpg", Alt: "a logo"}},
+	}
+
+	post, ok := raw.ToPost()
+	if !ok {
+		t.Fatal("an image-only post must convert")
+	}
+	if len(post.Media) != 1 {
+		t.Fatalf("expected 1 image, got %d", len(post.Media))
+	}
+	if post.Media[0].Alt != "a logo" {
+		t.Errorf("alt text should be kept, got %q", post.Media[0].Alt)
+	}
+	if post.Text != "" {
+		t.Errorf("expected empty text, got %q", post.Text)
+	}
+}
+
+func TestPostWithNeitherTextNorMediaIsDropped(t *testing.T) {
+	raw := RawPost{Href: "/a/status/1", Handle: "@a"}
+
+	if _, ok := raw.ToPost(); ok {
+		t.Fatal("a post with no text and no media carries nothing")
+	}
+}
+
+func TestBlankMediaURLsAreIgnored(t *testing.T) {
+	raw := RawPost{
+		Href:   "/a/status/1",
+		Text:   "hello",
+		Handle: "@a",
+		Media:  []RawMedia{{URL: "   "}, {URL: "https://pbs.twimg.com/media/x.jpg"}},
+	}
+
+	post, ok := raw.ToPost()
+	if !ok {
+		t.Fatal("expected the post to convert")
+	}
+	if len(post.Media) != 1 {
+		t.Fatalf("blank URLs should be dropped, got %d entries", len(post.Media))
+	}
+}
+
 func TestToPostsSkipsUnusableEntries(t *testing.T) {
 	got := ToPosts([]RawPost{
 		{Href: "/a/status/1", Text: "one", Handle: "@a"},

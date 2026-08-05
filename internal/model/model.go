@@ -19,6 +19,16 @@ type Post struct {
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	Author    Author    `json:"author"`
 	Metrics   Metrics   `json:"metrics"`
+	// Media holds the images attached to the post. Plenty of posts carry no
+	// text at all -- image-only replies are how threads of visual work are
+	// usually published -- so this is often the entire content.
+	Media []Media `json:"media,omitempty"`
+}
+
+// Media is an image attached to a post.
+type Media struct {
+	URL string `json:"url"`
+	Alt string `json:"alt,omitempty"`
 }
 
 // Author is the account that published a post.
@@ -50,11 +60,16 @@ type Contributor struct {
 	Posts  int    `json:"posts"`
 }
 
-// Usable reports whether a post carries enough to be worth returning. Partially
-// rendered timeline entries are common, and they are dropped rather than
-// surfaced as blanks.
+// Usable reports whether a post carries enough to be worth returning.
+//
+// Partially rendered timeline entries are common and are dropped rather than
+// surfaced as blanks. Text is not required: an image-only post is complete,
+// and requiring text silently discarded whole self-threads of visual work.
 func (p Post) Usable() bool {
-	return p.ID != "" && strings.TrimSpace(p.Text) != "" && p.Author.Handle != ""
+	if p.ID == "" || p.Author.Handle == "" {
+		return false
+	}
+	return strings.TrimSpace(p.Text) != "" || len(p.Media) > 0
 }
 
 // Dedupe returns the usable posts in input order with duplicate IDs removed,

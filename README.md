@@ -27,7 +27,7 @@ Agent ──MCP──▶ x-browser-mcp ──CDP──▶ Chrome (your profile) 
 One command, no clone:
 
 ```bash
-go install github.com/SohrabZ/x-browser-mcp@v0.0.2
+go install github.com/SohrabZ/x-browser-mcp@v0.0.3
 ```
 
 Requires [Go 1.25+](https://go.dev/dl/). The binary lands in `$(go env GOPATH)/bin`
@@ -95,9 +95,10 @@ chose to show you.
 - Home timeline
 - Search, latest or top
 - Any account's posts
-- A post and its replies
+- A post and its replies, including image-only self-threads
 - Your bookmarks
 - Any list timeline
+- Attached images, with alt text where X provides it
 
 **Write** (off by default, see [Writing](#writing))
 
@@ -114,7 +115,7 @@ Everything is available over both MCP and a plain HTTP API.
 ## Quick start
 
 ```bash
-go install github.com/SohrabZ/x-browser-mcp@v0.0.2
+go install github.com/SohrabZ/x-browser-mcp@v0.0.3
 x-browser-mcp
 ```
 
@@ -231,6 +232,8 @@ Also enforced:
 
 ## Security
 
+See [SECURITY.md](SECURITY.md) for the full picture and how to report issues.
+
 This server exposes a logged-in X session over an **unauthenticated** API.
 Anything that can reach the port can read your timeline and, if writes are on,
 act as you.
@@ -268,7 +271,8 @@ act as you.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [DESIGN.md](DESIGN.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md), [TESTING.md](TESTING.md) and
+[DESIGN.md](DESIGN.md).
 
 ## License
 
