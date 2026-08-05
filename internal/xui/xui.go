@@ -21,7 +21,13 @@ import (
 const (
 	HomeURL      = "https://x.com/home"
 	BookmarksURL = "https://x.com/i/bookmarks"
-	loginPath    = "/i/flow/login"
+
+	// NotificationsURL is the "All" tab: likes, follows, reposts and X's own
+	// recommendations, most of which are not posts. MentionsURL is the tab that
+	// is, so it reads on the ordinary post path.
+	NotificationsURL = "https://x.com/notifications"
+	MentionsURL      = "https://x.com/notifications/mentions"
+	loginPath        = "/i/flow/login"
 )
 
 // SearchMode selects which tab of X search results to read.
@@ -110,7 +116,104 @@ const (
 	// SelPost is the article X wraps around a single post, and the unit the
 	// engagement controls above belong to. See ControlScript.
 	SelPost = `article[data-testid="tweet"]`
+
+	// SelNotification is a cell of the notifications timeline. It is not a post:
+	// see NotificationScript.
+	SelNotification = `[data-testid="notification"]`
 )
+
+// RawNotification is a notification cell as scraped, before validation. It
+// matches the shape returned by NotificationScript.
+type RawNotification struct {
+	Kind    string   `json:"kind"`
+	Handles []string `json:"handles"`
+	// Display names are not collected per account: the cell names them in its
+	// text but does not attach them to the avatars in any way that survives
+	// aggregation. Text carries them; Actors carry the handles.
+	Text      string `json:"text"`
+	PostText  string `json:"post_text"`
+	CreatedAt string `json:"created_at"`
+}
+
+// NotificationScript reads every notification cell currently rendered.
+//
+// It takes no limit and applies none. Capping here would cap DOM nodes before
+// anything has been deduplicated or discarded, so a page whose first cells repeat
+// would return fewer than asked for while the rest sat rendered just below. The
+// cap belongs after conversion, where what is counted is notifications rather
+// than elements.
+//
+// This exists because the notifications timeline is not a timeline of posts. Of
+// eighteen cells on a real account, one was a post and sixteen were cells with
+// no post in them at all -- likes, follows, and X's own "recent post from"
+// recommendations. Running the post extractor over this page returns the one and
+// silently drops the rest, which is a worse answer than none.
+//
+// What a cell reliably gives is a timestamp, the accounts it names, and the words
+// X wrote. What it does not give is a link to the post it concerns -- every link
+// in the cell goes to an account -- so there is no id or URL to report, only the
+// post's text where the cell shows it.
+//
+// Kind is read from those words and is empty when none match. X distinguishes a
+// like from a follow with an icon carrying no identifier, so there is nothing
+// language-independent to read; Text still says what happened.
+const NotificationScript = `() => {
+  const kindOf = text => {
+    const t = text.toLowerCase();
+    if (t.includes('followed you')) return 'follow';
+    if (t.includes('liked')) return 'like';
+    if (t.includes('reposted')) return 'repost';
+    if (t.includes('replying to') || t.includes('replied')) return 'reply';
+    if (t.includes('mentioned you')) return 'mention';
+    if (t.startsWith('recent post from') || t.includes('there was a post')) return 'recommended';
+    return '';
+  };
+
+  return Array.from(document.querySelectorAll('[data-testid="notification"]'))
+    .map(cell => {
+      // Everything is read from this cell and nowhere else. Widening to the
+      // surrounding wrapper when a cell holds nothing looks harmless and is not:
+      // a follow has no post, so the wrapper hands it the neighbouring cell's,
+      // and the notification then reports a post it has nothing to do with.
+      // Absent has to stay absent -- there is no way to tell "X moved this out of
+      // the cell" from "this cell does not have one", and guessing wrong invents
+      // content rather than losing it.
+      //
+      // A quoted post is excluded the same way ControlScript excludes one: by
+      // ownership. Anything inside a nested article belongs to that post, not to
+      // this notification, so its text and its author are not this cell's.
+      const within = (sel) => Array.from(cell.querySelectorAll(sel))
+        .filter(e => e.closest('article') === cell.closest('article'));
+
+      const post = within('[data-testid="tweetText"]')[0] || null;
+
+      // The words X wrote, without the post it quotes underneath -- that is
+      // reported separately rather than run together with the event.
+      //
+      // Taken off the end, not replaced: X renders the post beneath the event, and
+      // the post's words can also occur in the event itself. "Alice liked your
+      // post" over a post reading "your post" would otherwise lose the phrase from
+      // the sentence and keep it in the quote.
+      const postText = post ? post.innerText : '';
+      let text = cell.innerText || '';
+      if (postText) {
+        const at = text.lastIndexOf(postText);
+        if (at !== -1) text = text.slice(0, at) + text.slice(at + postText.length);
+      }
+
+      const handles = within('[data-testid^="UserAvatar-Container-"]')
+        .map(e => e.getAttribute('data-testid').replace('UserAvatar-Container-', ''))
+        .filter(Boolean);
+
+      return {
+        kind: kindOf(text),
+        handles: Array.from(new Set(handles)),
+        text: text,
+        post_text: postText,
+        created_at: (within('time')[0] || {}).dateTime || '',
+      };
+    });
+}`
 
 // ControlScript finds one post's engagement control and, when asked to, presses
 // it. It takes a post id, a selector and a flag, and returns "ok", "no-control"
@@ -283,6 +386,46 @@ func ToPosts(raw []RawPost) []model.Post {
 	for _, r := range raw {
 		if post, ok := r.ToPost(); ok {
 			out = append(out, post)
+		}
+	}
+	return out
+}
+
+// ToNotification converts a scraped cell, reporting whether it said enough to
+// keep.
+func (r RawNotification) ToNotification() (model.Notification, bool) {
+	text := model.Normalize(r.Text)
+	if text == "" {
+		return model.Notification{}, false
+	}
+
+	actors := make([]model.Author, 0, len(r.Handles))
+	for _, h := range r.Handles {
+		if handle := NormalizeHandle(h); handle != "" {
+			actors = append(actors, model.Author{Handle: handle})
+		}
+	}
+
+	n := model.Notification{
+		Kind:     r.Kind,
+		Text:     text,
+		PostText: model.Normalize(r.PostText),
+	}
+	if len(actors) > 0 {
+		n.Actors = actors
+	}
+	if at, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil {
+		n.CreatedAt = at.UTC()
+	}
+	return n, true
+}
+
+// ToNotifications converts scraped cells, dropping the ones that said nothing.
+func ToNotifications(raw []RawNotification) []model.Notification {
+	out := make([]model.Notification, 0, len(raw))
+	for _, r := range raw {
+		if n, ok := r.ToNotification(); ok {
+			out = append(out, n)
 		}
 	}
 	return out

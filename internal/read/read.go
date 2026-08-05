@@ -105,7 +105,8 @@ type Reader struct {
 	lease  Lease
 	auth   *auth.Manager
 	budget *limit.Budget
-	cache  *cache
+	cache  *cache[Result]
+	notifs *cache[NotificationResult]
 
 	timeout time.Duration
 }
@@ -125,7 +126,8 @@ func New(opts Options) *Reader {
 		lease:   opts.Lease,
 		auth:    opts.Auth,
 		budget:  opts.Budget,
-		cache:   newCache(opts.CacheFor),
+		cache:   newCache[Result](opts.CacheFor),
+		notifs:  newCache[NotificationResult](opts.CacheFor),
 		timeout: opts.Timeout,
 	}
 }
@@ -138,6 +140,7 @@ func New(opts Options) *Reader {
 // the rest of the TTL makes the write look like it did not happen.
 func (r *Reader) Invalidate() {
 	r.cache.Invalidate()
+	r.notifs.Invalidate()
 }
 
 func (r *Reader) Home(ctx context.Context, n int) (Result, error) {
@@ -184,42 +187,68 @@ func (r *Reader) List(ctx context.Context, listID string, n int) (Result, error)
 	return r.timeline(ctx, cacheKey("list|"+listID, n), xui.ListURL(listID), n)
 }
 
+// Resolved is what a URL turned out to point at.
+//
+// The kind is returned rather than inferred. The caller used to work it out by
+// checking whether a thread had a root, which is indistinguishable from a thread
+// that failed to render -- and there is now a third shape, since a notification
+// is neither a post nor a thread.
+type Resolved struct {
+	Kind          xui.TargetKind      `json:"kind"`
+	Posts         *Result             `json:"posts,omitempty"`
+	Thread        *model.Thread       `json:"thread,omitempty"`
+	Notifications *NotificationResult `json:"notifications,omitempty"`
+}
+
 // FromURL reads whatever an x.com URL points at.
 //
 // Callers paste links rather than assembling handle/id pairs, so this is the
 // entry point that matches how the tools are actually used. A post URL yields a
 // thread; a profile, list, bookmarks or search URL yields that timeline.
-func (r *Reader) FromURL(ctx context.Context, raw string, n int) (Result, model.Thread, error) {
+func (r *Reader) FromURL(ctx context.Context, raw string, n int) (Resolved, error) {
 	target, err := xui.ParseURL(raw)
 	if err != nil {
 		// Every way this fails is the caller's URL being wrong -- not an x.com
 		// link, no post id in it, a search with no query. Saying so is the whole
 		// use of this entry point, since callers paste links rather than assemble
 		// handle and id pairs, and an unclassified error would say nothing at all.
-		return Result{}, model.Thread{}, invalid("%s", shorten(err.Error()))
+		return Resolved{}, invalid("%s", shorten(err.Error()))
+	}
+
+	posts := func(res Result, err error) (Resolved, error) {
+		if err != nil {
+			return Resolved{}, err
+		}
+		return Resolved{Kind: target.Kind, Posts: &res}, nil
 	}
 
 	switch target.Kind {
 	case xui.TargetPost:
 		thread, err := r.Thread(ctx, target.Handle, target.PostID, n)
-		return Result{}, thread, err
+		if err != nil {
+			return Resolved{}, err
+		}
+		return Resolved{Kind: target.Kind, Thread: &thread}, nil
 	case xui.TargetProfile:
-		res, err := r.UserPosts(ctx, target.Handle, n)
-		return res, model.Thread{}, err
+		return posts(r.UserPosts(ctx, target.Handle, n))
 	case xui.TargetList:
-		res, err := r.List(ctx, target.ListID, n)
-		return res, model.Thread{}, err
+		return posts(r.List(ctx, target.ListID, n))
 	case xui.TargetBookmarks:
-		res, err := r.Bookmarks(ctx, n)
-		return res, model.Thread{}, err
+		return posts(r.Bookmarks(ctx, n))
 	case xui.TargetHome:
-		res, err := r.Home(ctx, n)
-		return res, model.Thread{}, err
+		return posts(r.Home(ctx, n))
 	case xui.TargetSearch:
-		res, err := r.Search(ctx, Query{Text: target.Query, Limit: n})
-		return res, model.Thread{}, err
+		return posts(r.Search(ctx, Query{Text: target.Query, Limit: n}))
+	case xui.TargetMentions:
+		return posts(r.Mentions(ctx, n))
+	case xui.TargetNotifications:
+		res, err := r.Notifications(ctx, n)
+		if err != nil {
+			return Resolved{}, err
+		}
+		return Resolved{Kind: target.Kind, Notifications: &res}, nil
 	default:
-		return Result{}, model.Thread{}, invalid("unsupported URL: %s", raw)
+		return Resolved{}, invalid("unsupported URL: %s", raw)
 	}
 }
 
@@ -262,7 +291,8 @@ func (r *Reader) timeline(ctx context.Context, key, url string, n int) (Result, 
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	posts, err := r.collect(ctx, url, n)
+	posts, err := collect(ctx, r, url, n, scrape, model.Dedupe,
+		"no posts found; the account or list may not exist, or X did not render the timeline")
 	if err != nil {
 		return Result{}, err
 	}
@@ -276,9 +306,78 @@ func (r *Reader) timeline(ctx context.Context, key, url string, n int) (Result, 
 	return result, nil
 }
 
-// collect opens the page and scrolls until it has enough posts or the timeline
+// NotificationResult is a page of notifications.
+//
+// There is no Contributors here as there is for posts: a notification names its
+// own actors, and several of them for an aggregated cell, so ranking accounts
+// across the page would be counting the same like twice.
+type NotificationResult struct {
+	Notifications []model.Notification `json:"notifications"`
+	FetchedAt     time.Time            `json:"fetched_at"`
+	Cached        bool                 `json:"cached"`
+}
+
+// Mentions reads the notifications tab that holds posts.
+//
+// Mentions are ordinary posts, so this is the ordinary post path pointed at a
+// different URL. Notifications are not, and take their own.
+func (r *Reader) Mentions(ctx context.Context, n int) (Result, error) {
+	n = ClampLimit(n)
+	return r.timeline(ctx, cacheKey("mentions", n), xui.MentionsURL, n)
+}
+
+// Notifications reads the "All" tab: likes, follows, reposts and X's own
+// recommendations.
+//
+// Almost none of these are posts. On a real account, seventeen of eighteen cells
+// held no post at all, so reading this page with the post extractor would return
+// the one and quietly present it as the lot.
+func (r *Reader) Notifications(ctx context.Context, n int) (NotificationResult, error) {
+	n = ClampLimit(n)
+	key := cacheKey("notifications", n)
+
+	if hit, ok := r.notifs.get(key); ok {
+		hit.Cached = true
+		return hit, nil
+	}
+
+	if err := r.auth.Require(ctx); err != nil {
+		return NotificationResult{}, err
+	}
+	if err := r.budget.Wait(ctx); err != nil {
+		return NotificationResult{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+
+	items, err := collect(ctx, r, xui.NotificationsURL, n,
+		scrapeNotifications, model.DedupeNotifications, "no notifications found")
+	if err != nil {
+		return NotificationResult{}, err
+	}
+
+	result := NotificationResult{Notifications: items, FetchedAt: time.Now().UTC()}
+	r.notifs.put(key, result)
+	return result, nil
+}
+
+// collect opens the page and scrolls until it has enough items or the timeline
 // stops yielding new ones.
-func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, error) {
+//
+// It is a function rather than a method, and generic over what it gathers, so the
+// notifications surface shares this loop instead of copying it. Only two things
+// differ between the surfaces: how a batch is read off the page, and how repeats
+// are recognised.
+func collect[T any](
+	ctx context.Context,
+	r *Reader,
+	url string,
+	n int,
+	read func(*browser.Page, int) ([]T, error),
+	dedupe func([]T, int) []T,
+	emptyReason string,
+) ([]T, error) {
 	session, release, err := r.lease(ctx)
 	if err != nil {
 		return nil, err
@@ -296,7 +395,7 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 	}
 
 	var (
-		gathered []model.Post
+		gathered []T
 		stalled  int
 		// The first thing that went wrong, kept in case nothing is gathered: an
 		// empty timeline and a browser that died look identical from here.
@@ -313,13 +412,13 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 			return nil, err
 		}
 
-		batch, err := scrape(page, n)
+		batch, err := read(page, n)
 		if err != nil && failed == nil {
 			failed = err
 		}
 		if err == nil {
 			before := len(gathered)
-			gathered = model.Dedupe(append(gathered, batch...), n)
+			gathered = dedupe(append(gathered, batch...), n)
 
 			if len(gathered) >= n {
 				return gathered, nil
@@ -349,7 +448,7 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 	}
 
 	if len(gathered) == 0 {
-		return nil, cameBackEmpty(ctx.Err(), failed)
+		return nil, cameBackEmpty(ctx.Err(), failed, emptyReason)
 	}
 	return gathered, nil
 }
@@ -361,14 +460,33 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 // timeline genuinely had nothing. Only the third is "not found", and answering
 // that for either of the others sends the caller looking for a post that may
 // well exist while hiding the fault that stopped it being found.
-func cameBackEmpty(ctxErr, failed error) error {
+func cameBackEmpty(ctxErr, failed error, reason string) error {
 	if ctxErr != nil {
 		return ctxErr
 	}
 	if failed != nil {
 		return failed
 	}
-	return notFound("no posts found; the account or list may not exist, or X did not render the timeline")
+	return notFound("%s", reason)
+}
+
+// scrapeNotifications runs the notification script and converts what it finds.
+//
+// The limit is ignored here on purpose. Capping in the page caps DOM nodes before
+// repeats and empty cells have been discarded, so a page whose first cells repeat
+// would come back short while the rest sat rendered below it. collect applies the
+// cap when it dedupes, where what is counted is notifications.
+func scrapeNotifications(page *browser.Page, _ int) ([]model.Notification, error) {
+	value, err := page.Rod().Eval(xui.NotificationScript)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw []xui.RawNotification
+	if err := value.Value.Unmarshal(&raw); err != nil {
+		return nil, fmt.Errorf("decode scraped notifications: %w", err)
+	}
+	return xui.ToNotifications(raw), nil
 }
 
 // scrape runs the extraction script and converts what it finds.

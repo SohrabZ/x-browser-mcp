@@ -94,11 +94,10 @@ func TestParseSearchURL(t *testing.T) {
 	}
 }
 
-// Reserved paths are X's own routes, not accounts. Treating /notifications as a
+// Reserved paths are X's own routes, not accounts. Treating /messages as a
 // profile would send a reader to a page that has no such account.
 func TestReservedPathsAreNotTreatedAsProfiles(t *testing.T) {
 	for _, raw := range []string{
-		"https://x.com/notifications",
 		"https://x.com/messages",
 		"https://x.com/settings",
 		"https://x.com/explore",
@@ -106,6 +105,40 @@ func TestReservedPathsAreNotTreatedAsProfiles(t *testing.T) {
 	} {
 		if got, err := ParseURL(raw); err == nil {
 			t.Errorf("%q should be unsupported, got %+v", raw, got)
+		}
+	}
+}
+
+// The two notification routes are reserved paths that this does read, and they
+// read differently: one holds posts and the other mostly does not.
+func TestTheNotificationRoutesAreDistinctTargets(t *testing.T) {
+	cases := map[string]TargetKind{
+		"https://x.com/notifications":          TargetNotifications,
+		"https://x.com/notifications/mentions": TargetMentions,
+		"https://twitter.com/notifications":    TargetNotifications,
+		"x.com/notifications/mentions":         TargetMentions,
+	}
+	for raw, want := range cases {
+		got, err := ParseURL(raw)
+		if err != nil {
+			t.Errorf("%q: %v", raw, err)
+			continue
+		}
+		if got.Kind != want {
+			t.Errorf("%q: kind %q, want %q", raw, got.Kind, want)
+		}
+	}
+
+	// A tab this cannot read is still unsupported rather than guessed at, and
+	// neither is anything hanging off the one it can: /mentions is the route, so
+	// /mentions/something is not it.
+	for _, raw := range []string{
+		"https://x.com/notifications/verified",
+		"https://x.com/notifications/mentions/extra",
+		"https://x.com/notifications/mentions/1/2",
+	} {
+		if got, err := ParseURL(raw); err == nil {
+			t.Errorf("%q was accepted as %+v", raw, got)
 		}
 	}
 }

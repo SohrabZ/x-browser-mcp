@@ -98,6 +98,7 @@ chose to show you.
 - A post and its replies, including image-only self-threads
 - X Articles — long-form posts, with title and body
 - Your bookmarks
+- Posts mentioning you, and your notifications
 - Any list timeline
 - Attached images, with alt text where X provides it
 
@@ -175,6 +176,8 @@ Point a streamable-HTTP MCP client at `http://127.0.0.1:18110/mcp`, or use
 | `read_user_posts`    | one account's posts                     | browser DOM parsing | yes                |
 | `read_thread`        | a post and its replies                  | browser DOM parsing | yes                |
 | `read_bookmarks`     | your saved posts                        | browser DOM parsing | yes                |
+| `read_mentions`      | posts that mention you                  | browser DOM parsing | yes                |
+| `read_notifications` | likes, follows, reposts, recommendations | browser DOM parsing | yes                |
 | `read_list`          | a list timeline                         | browser DOM parsing | yes                |
 | `post_to_x`          | publish a post                          | browser automation  | **no** — `-allow-writes` |
 | `reply_to_post`      | reply to a post                         | browser automation  | **no** — `-allow-writes` |
@@ -195,6 +198,8 @@ GET  /api/v1/login/status
 POST /api/v1/login/start
 GET  /api/v1/home?limit=10
 GET  /api/v1/bookmarks?limit=10
+GET  /api/v1/mentions?limit=10
+GET  /api/v1/notifications?limit=10
 GET  /api/v1/user/{handle}?limit=10
 GET  /api/v1/list/{id}?limit=10
 GET  /api/v1/thread/{handle}/{id}

@@ -99,7 +99,24 @@ Expect the root plus 10 replies, each carrying one entry in `media` and an empty
 Note that X's own reply counter shows `1` for that post — self-thread replies do
 not count toward it, so the counter is not a check on this.
 
-### 4. X Articles
+### 4. Notifications and mentions
+
+These two look like one feature and are not. `/notifications` is mostly cells with
+no post in them, so it has its own extraction; `/notifications/mentions` is posts.
+
+```bash
+curl -s 'http://127.0.0.1:18110/api/v1/mentions?limit=5'
+curl -s 'http://127.0.0.1:18110/api/v1/notifications?limit=10' \
+  | python3 -c 'import sys,json; [print(n["kind"] or "?", "|", n["text"][:70]) for n in json.load(sys.stdin)["notifications"]]'
+```
+
+Expect mentions to come back as ordinary posts. For notifications, expect roughly
+as many rows as the page shows cells — if the count collapses to one or two, the
+post extractor is being used and everything that is not a post has been dropped.
+`kind` is read from X's own words and will be empty under a non-English interface;
+`text` still says what happened.
+
+### 5. X Articles
 
 Long-form posts render nothing under `tweetText`; their headline and body live
 under their own testids, so this breaks separately from ordinary posts:
@@ -112,13 +129,13 @@ curl -s 'http://127.0.0.1:18110/api/v1/thread/Alfred_Lin/2084636778791858256?lim
 Expect a non-empty `title` and a body of a few thousand characters. An empty
 `text` means the article selectors have drifted.
 
-### 5. End-to-end check with an agent
+### 6. End-to-end check with an agent
 
 Connectivity first:
 
 ```bash
 claude mcp list                  # expect: x-browser-mcp ... ✔ Connected
-hermes mcp test x-browser-mcp    # expect: ✓ Tools discovered: 9 (15 with -allow-writes)
+hermes mcp test x-browser-mcp    # expect: ✓ Tools discovered: 11 (17 with -allow-writes)
 ```
 
 Connectivity is not the interesting part. **Tool descriptions are prompts**, and
@@ -171,7 +188,7 @@ claude -p "Use the x-browser-mcp tools to read my X home timeline (5 posts). \
 - **A tool the client cannot see** — after adding a tool, clients discover it on
   a fresh session. Re-run `hermes mcp test` to confirm the count changed.
 
-### 6. Write gating
+### 7. Write gating
 
 ```bash
 ./x-browser-mcp -allow-writes
@@ -194,7 +211,7 @@ curl -s -X POST http://127.0.0.1:18110/mcp \
 
 Only test writes against an account you are willing to post from.
 
-### 7. Writes that actually take effect
+### 8. Writes that actually take effect
 
 The gate checks above pass whether or not a write does anything. Check the
 action separately, and check it the only way that works:

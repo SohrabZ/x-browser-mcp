@@ -129,6 +129,8 @@ func TestReadToolsAreAlwaysRegistered(t *testing.T) {
 		"read_bookmarks",
 		"read_list",
 		"read_x_url",
+		"read_mentions",
+		"read_notifications",
 	}
 	for _, name := range want {
 		if _, found := tools[name]; !found {

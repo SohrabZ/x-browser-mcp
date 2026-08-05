@@ -32,7 +32,7 @@ internal/
   pool/                – one warm browser shared across reads; exclusive handover for writes
   auth/                – is the session usable, and the interactive login window
   limit/               – pacing: a floor between calls and a ceiling per window
-  read/                – the read surfaces: timelines, search, threads, bookmarks, lists
+  read/                – the read surfaces: timelines, search, threads, bookmarks, lists, notifications
   write/               – the mutating actions, behind the gate
   fault/               – what a failure is allowed to say to a caller
   httpapi/             – REST routes, the Host/Origin guard, mounts MCP
@@ -53,6 +53,11 @@ import each other.
 - **Anything that disturbs the page inside that window cancels the request** —
   closing the browser, navigating, even reloading in order to check. A check
   written carelessly here *causes* the failure it is looking for.
+- **The notifications tab is not a timeline of posts.** On a real account, one of
+  eighteen cells held a post; the rest were likes, follows and recommendations
+  with none. It has its own script and type, and X aggregates — a cell naming two
+  accounts stays one notification with two actors. Mentions *are* posts and read
+  on the ordinary path.
 - **A permalink is not one post.** X renders ancestors, replies and quoted posts
   alongside it, each with its own action row. Page-wide selectors answer for
   whichever comes first, so presses and checks are scoped to one article — see
@@ -88,7 +93,7 @@ import each other.
   test passes either way without this.
 - **Writes must be verified against live X** before a release. The tool's own
   success report does not count — confirm from a fresh page load after the write
-  browser is gone. `TESTING.md` section 7 has the procedure and the reason it has
+  browser is gone. `TESTING.md` section 8 has the procedure and the reason it has
   to be indirect.
 - **Prove a test is not vacuous** by reverting the fix and watching it fail. Most
   of the guarantees here are about *not* doing something, and a test for that

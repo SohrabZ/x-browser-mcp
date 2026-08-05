@@ -6,8 +6,11 @@ Nothing here is a commitment to a date.
 ## Shipped
 
 **Reading** — home timeline, search (latest/top), an account's posts, a post and
-its replies, bookmarks, lists, and any x.com link via `read_x_url`. Posts carry
-attached images, and X Articles carry their title and body.
+its replies, bookmarks, lists, mentions, notifications, and any x.com link via
+`read_x_url`. Posts carry attached images, and X Articles carry their title and
+body. Notifications are their own shape rather than posts: most cells are likes,
+follows or X's own recommendations with no post in them, and X aggregates them, so
+a cell naming two accounts stays one notification with two actors.
 
 **Writing** — post, reply, like, repost, bookmark, and removing a bookmark. Off
 unless `-allow-writes`, and unregistered when off. Each requires a confirmation
@@ -33,11 +36,6 @@ Chrome may hold the profile, and closed after `-browser-idle` with no reads.
 `ResultTTL` and `StatusTTL` are fixed at five minutes and are not flags. A
 cached read costs nothing at all, so for read-heavy use a longer TTL is a bigger
 win than any transport change.
-
-### More read surfaces
-
-Notifications and mentions are the obvious gaps. Both are timeline-shaped, so
-they fit the existing extraction path.
 
 ## Known limitations
 

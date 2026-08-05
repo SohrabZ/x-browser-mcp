@@ -3,10 +3,14 @@ package read
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/SohrabZ/x-browser-mcp/internal/browser"
 	"github.com/SohrabZ/x-browser-mcp/internal/model"
 )
 
@@ -27,7 +31,7 @@ func TestClampLimit(t *testing.T) {
 }
 
 func TestCacheRoundTrips(t *testing.T) {
-	c := newCache(time.Minute)
+	c := newCache[Result](time.Minute)
 	want := Result{Posts: []model.Post{{ID: "1"}}}
 
 	c.put("k", want)
@@ -42,14 +46,14 @@ func TestCacheRoundTrips(t *testing.T) {
 }
 
 func TestCacheMissesOnUnknownKey(t *testing.T) {
-	c := newCache(time.Minute)
+	c := newCache[Result](time.Minute)
 	if _, ok := c.get("nope"); ok {
 		t.Fatal("expected a miss")
 	}
 }
 
 func TestCacheExpires(t *testing.T) {
-	c := newCache(time.Millisecond)
+	c := newCache[Result](time.Millisecond)
 	c.put("k", Result{})
 
 	time.Sleep(5 * time.Millisecond)
@@ -62,7 +66,7 @@ func TestCacheExpires(t *testing.T) {
 // A zero TTL disables caching outright rather than caching forever, which is
 // the dangerous reading of "no expiry".
 func TestZeroTTLDisablesCaching(t *testing.T) {
-	c := newCache(0)
+	c := newCache[Result](0)
 	c.put("k", Result{})
 
 	if _, ok := c.get("k"); ok {
@@ -71,7 +75,7 @@ func TestZeroTTLDisablesCaching(t *testing.T) {
 }
 
 func TestInvalidateClearsEverything(t *testing.T) {
-	c := newCache(time.Minute)
+	c := newCache[Result](time.Minute)
 	c.put("a", Result{})
 	c.put("b", Result{})
 
@@ -107,7 +111,7 @@ func TestCacheKeysAreDistinctPerSurfaceAndSize(t *testing.T) {
 }
 
 func TestConcurrentCacheAccessIsSafe(t *testing.T) {
-	c := newCache(time.Minute)
+	c := newCache[Result](time.Minute)
 	done := make(chan struct{})
 
 	for i := 0; i < 8; i++ {
@@ -163,7 +167,7 @@ func TestAReadThatBrokeIsNotReportedAsEmpty(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		got := cameBackEmpty(c.ctxErr, c.failed)
+		got := cameBackEmpty(c.ctxErr, c.failed, "nothing there")
 
 		var missing *NotFoundError
 		if absent := errors.As(got, &missing); absent != c.absent {
@@ -191,7 +195,7 @@ func TestABadURLIsTheCallersMistakeNotAFault(t *testing.T) {
 		"https://x.com/i/somewhere", // an /i/ route this cannot read
 		"https://x.com/settings",    // a reserved path that is not a timeline
 	} {
-		_, _, err := r.FromURL(context.Background(), raw, 5)
+		_, err := r.FromURL(context.Background(), raw, 5)
 		if err == nil {
 			t.Errorf("%q was accepted", raw)
 			continue
@@ -215,11 +219,352 @@ func TestABadURLIsTheCallersMistakeNotAFault(t *testing.T) {
 func TestAnEnormousURLIsNotQuotedBackWhole(t *testing.T) {
 	huge := "https://example.com/" + strings.Repeat("a", 20000) // not an x.com URL
 
-	_, _, err := New(Options{}).FromURL(context.Background(), huge, 5)
+	_, err := New(Options{}).FromURL(context.Background(), huge, 5)
 	if err == nil {
 		t.Fatal("a 20k URL was accepted")
 	}
 	if n := len(err.Error()); n > maxMessage+len("...") {
 		t.Errorf("the message is %d chars; it should be bounded at %d", n, maxMessage)
+	}
+}
+
+// The notifications page is mostly not posts, which is the whole reason it has
+// its own script. This fixture has the shapes a real account produced: one actor
+// liking one post, two actors liking one post, one actor liking several, a follow
+// with no post at all, X's own recommendation, and a reply that IS a post.
+const notificationFixture = `
+<div data-testid="cellInnerDiv">
+  <div data-testid="notification" role="article">
+    <div data-testid="UserAvatar-Container-RamyarKhalili"></div>
+    <span>Ramyar Khalili liked your post</span>
+    <time datetime="2026-08-05T10:36:27.747Z">7h</time>
+    <div data-testid="tweetText">This post was sent using the same MCP server.</div>
+  </div>
+</div>
+<div data-testid="cellInnerDiv">
+  <div data-testid="notification" role="article">
+    <div data-testid="UserAvatar-Container-RamyarKhalili"></div>
+    <div data-testid="UserAvatar-Container-SomniaRobotics"></div>
+    <span>Ramyar Khalili and Somnia Lab liked your post</span>
+    <time datetime="2026-08-05T10:32:02.300Z">7h</time>
+    <div data-testid="tweetText">Reading X through the API is pay-per-use now.</div>
+  </div>
+</div>
+<div data-testid="cellInnerDiv">
+  <div data-testid="notification" role="article">
+    <div data-testid="UserAvatar-Container-koalchack"></div>
+    <span>پانیخذ liked 2 of your posts</span>
+    <time datetime="2026-08-05T06:26:23.934Z">11h</time>
+    <div data-testid="tweetText">Reading X through the API is pay-per-use now.</div>
+  </div>
+</div>
+<div data-testid="cellInnerDiv">
+  <div data-testid="notification" role="article">
+    <div data-testid="UserAvatar-Container-SomniaRobotics"></div>
+    <span>Somnia Lab followed you</span>
+    <time datetime="2026-08-05T09:32:22.394Z">8h</time>
+  </div>
+</div>
+<div data-testid="cellInnerDiv">
+  <div data-testid="notification" role="article">
+    <div data-testid="UserAvatar-Container-VOAfarsi"></div>
+    <span>Recent post from VOA Farsi</span>
+    <time datetime="2026-08-04T20:00:00.000Z">22h</time>
+    <div data-testid="tweetText">A post this account published.</div>
+  </div>
+</div>
+<div data-testid="cellInnerDiv">
+  <article data-testid="tweet">
+    <div data-testid="User-Name"><span>پانیخذ</span><span>@koalchack</span></div>
+    <a href="/koalchack/status/2084888751042638284"><time datetime="2026-08-05T06:26:28.000Z">11h</time></a>
+    <div data-testid="tweetText">Nice</div>
+  </article>
+</div>`
+
+// scrapeFixture drives a real browser at a page, because a selector cannot be
+// tested any other way.
+func scrapeFixture(t *testing.T, body string, n int) []model.Notification {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("needs a browser")
+	}
+	chrome := browser.ChromePathForTest()
+	if chrome == "" {
+		t.Skip("no Chrome installed")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// With no charset Chrome does not read this as UTF-8 and non-Latin text
+		// arrives mangled, which would make this fixture quietly unlike X -- and
+		// a lot of what X serves is not Latin.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, "<html><head><meta charset=\"utf-8\"></head><body>%s</body></html>", body)
+	}))
+	defer srv.Close()
+
+	session, err := browser.Open(context.Background(), browser.Options{ChromePath: chrome, Headless: true})
+	if err != nil {
+		t.Skipf("cannot start chrome: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	page, err := session.Page(context.Background())
+	if err != nil {
+		t.Fatalf("page: %v", err)
+	}
+	defer page.Close()
+	if err := page.Goto(srv.URL); err != nil {
+		t.Fatalf("goto: %v", err)
+	}
+
+	got, err := scrapeNotifications(page, n)
+	if err != nil {
+		t.Fatalf("scrape: %v", err)
+	}
+	return got
+}
+
+// Every cell has to come back. Reading this page with the post extractor would
+// return the single reply and drop the other five, which is a worse answer than
+// no answer: it looks complete.
+func TestEveryNotificationCellIsRead(t *testing.T) {
+	got := scrapeFixture(t, notificationFixture, 50)
+
+	if len(got) != 5 {
+		t.Fatalf("read %d notifications, want 5 (the article is not one): %+v", len(got), got)
+	}
+	for i, n := range got {
+		if n.Text == "" {
+			t.Errorf("notification %d has no text", i)
+		}
+		if n.CreatedAt.IsZero() {
+			t.Errorf("notification %d has no timestamp", i)
+		}
+	}
+}
+
+// An aggregated cell keeps both actors rather than being split into rows X never
+// rendered, and the post it concerns is reported apart from the words about it.
+func TestAnAggregatedCellKeepsItsActors(t *testing.T) {
+	got := scrapeFixture(t, notificationFixture, 50)
+
+	var found bool
+	for _, n := range got {
+		if !strings.Contains(n.Text, "and Somnia Lab") {
+			continue
+		}
+		found = true
+		if len(n.Actors) != 2 {
+			t.Errorf("actors %+v, want both accounts", n.Actors)
+		}
+		if n.PostText != "Reading X through the API is pay-per-use now." {
+			t.Errorf("post text %q, want the post it concerns", n.PostText)
+		}
+		if strings.Contains(n.Text, "pay-per-use") {
+			t.Error("the post text was run together with the words about it")
+		}
+	}
+	if !found {
+		t.Fatal("the two-actor cell was not read")
+	}
+}
+
+// Kind is read from X's own words, so it is a convenience and not a contract.
+// What matters is that it is right when it is set and absent when unsure.
+func TestKindIsReadWhenTheWordsSayIt(t *testing.T) {
+	got := scrapeFixture(t, notificationFixture, 50)
+
+	kinds := map[string]string{}
+	for _, n := range got {
+		kinds[n.Text] = n.Kind
+	}
+	for text, kind := range kinds {
+		var want string
+		switch {
+		case strings.Contains(text, "followed you"):
+			want = model.NotifFollow
+		case strings.Contains(text, "liked"):
+			want = model.NotifLike
+		case strings.Contains(text, "Recent post from"):
+			want = model.NotifRecommended
+		}
+		if kind != want {
+			t.Errorf("%q: kind %q, want %q", text, kind, want)
+		}
+	}
+}
+
+// Non-Latin text has to survive the round trip. This account's own notifications
+// are largely Persian, so a fixture that only proves ASCII works proves little.
+func TestNonLatinNotificationTextSurvives(t *testing.T) {
+	got := scrapeFixture(t, notificationFixture, 50)
+
+	for _, n := range got {
+		if strings.Contains(n.Text, "liked 2 of your posts") {
+			if !strings.Contains(n.Text, "پانیخذ") {
+				t.Errorf("the Persian name did not survive: %q", n.Text)
+			}
+			return
+		}
+	}
+	t.Fatal("the cell with a non-Latin name was not read")
+}
+
+// A follow names nobody's post, and must not borrow the next cell's.
+func TestAFollowCarriesNoPostText(t *testing.T) {
+	got := scrapeFixture(t, notificationFixture, 50)
+
+	for _, n := range got {
+		if strings.Contains(n.Text, "followed you") && n.PostText != "" {
+			t.Errorf("a follow reported post text %q", n.PostText)
+		}
+	}
+}
+
+// The script deliberately does not cap. Capping in the page caps DOM nodes
+// before repeats and empty cells are discarded, so the cap belongs where what is
+// being counted is notifications -- which is what the caller asked for.
+func TestTheScriptReadsEveryCellAndLeavesTheCapToTheCaller(t *testing.T) {
+	all := scrapeFixture(t, notificationFixture, 2)
+	if len(all) != 5 {
+		t.Fatalf("read %d, want every cell regardless of the limit", len(all))
+	}
+	if capped := model.DedupeNotifications(all, 2); len(capped) != 2 {
+		t.Errorf("the caller's cap kept %d, want 2", len(capped))
+	}
+}
+
+// A notification's actors and its post must come from that cell and no other. X
+// puts one notification per wrapper today, so this is a guard against a page
+// where it does not: two cells in one wrapper must not merge into one another.
+func TestActorsDoNotLeakBetweenCellsSharingAWrapper(t *testing.T) {
+	shared := `
+<div data-testid="cellInnerDiv">
+  <div data-testid="notification" role="article">
+    <div data-testid="UserAvatar-Container-first"></div>
+    <span>First Person liked your post</span>
+    <time datetime="2026-08-05T10:00:00.000Z">1h</time>
+    <div data-testid="tweetText">The post the first one liked.</div>
+  </div>
+  <div data-testid="notification" role="article">
+    <div data-testid="UserAvatar-Container-second"></div>
+    <span>Second Person followed you</span>
+    <time datetime="2026-08-05T09:00:00.000Z">2h</time>
+  </div>
+</div>`
+
+	got := scrapeFixture(t, shared, 10)
+	if len(got) != 2 {
+		t.Fatalf("read %d, want 2: %+v", len(got), got)
+	}
+
+	for _, n := range got {
+		if len(n.Actors) != 1 {
+			t.Errorf("%q has actors %+v; each cell names one", n.Text, n.Actors)
+		}
+	}
+	for _, n := range got {
+		if strings.Contains(n.Text, "followed you") {
+			if n.PostText != "" {
+				t.Errorf("the follow took the other cell's post: %q", n.PostText)
+			}
+			if !n.CreatedAt.Equal(time.Date(2026, 8, 5, 9, 0, 0, 0, time.UTC)) {
+				t.Errorf("the follow took the other cell's time: %s", n.CreatedAt)
+			}
+		}
+	}
+}
+
+// Repeats among the first cells must not shorten the answer. Capping in the page
+// would cap DOM nodes, so two identical cells followed by a third distinct one
+// would return one notification while the third sat rendered just below.
+func TestRepeatsAmongTheFirstCellsDoNotShortenTheAnswer(t *testing.T) {
+	cell := func(handle, text, at, post string) string {
+		body := fmt.Sprintf(`<div data-testid="UserAvatar-Container-%s"></div><span>%s</span>
+			<time datetime="%s">1h</time>`, handle, text, at)
+		if post != "" {
+			body += fmt.Sprintf(`<div data-testid="tweetText">%s</div>`, post)
+		}
+		return fmt.Sprintf(`<div data-testid="cellInnerDiv"><div data-testid="notification" role="article">%s</div></div>`, body)
+	}
+
+	// The first two cells are the same notification rendered twice.
+	page := cell("alice", "Alice liked your post", "2026-08-05T10:00:00.000Z", "a post") +
+		cell("alice", "Alice liked your post", "2026-08-05T10:00:00.000Z", "a post") +
+		cell("bob", "Bob followed you", "2026-08-05T09:00:00.000Z", "")
+
+	got := scrapeFixture(t, page, 50)
+	if len(got) != 3 {
+		t.Fatalf("the script read %d cells, want all 3 before dedupe", len(got))
+	}
+
+	// And the cap counts notifications, so asking for two gets two distinct ones.
+	kept := model.DedupeNotifications(got, 2)
+	if len(kept) != 2 {
+		t.Fatalf("kept %d, want 2: %+v", len(kept), kept)
+	}
+	if !strings.Contains(kept[1].Text, "Bob") {
+		t.Errorf("second kept is %q; the repeat should not have used up the limit", kept[1].Text)
+	}
+}
+
+// A quoted post inside a notification belongs to that post, not to the
+// notification. Its text is not what the event concerns and its author is not an
+// actor.
+func TestAQuotedPostInsideANotificationIsNotTheNotification(t *testing.T) {
+	page := `
+<div data-testid="cellInnerDiv">
+  <article data-testid="tweet">
+    <div data-testid="notification" role="article">
+      <div data-testid="UserAvatar-Container-alice"></div>
+      <span>Alice liked your post</span>
+      <time datetime="2026-08-05T10:00:00.000Z">1h</time>
+      <div data-testid="tweetText">The post Alice liked.</div>
+      <article data-testid="tweet">
+        <div data-testid="UserAvatar-Container-quoted"></div>
+        <div data-testid="tweetText">A different post, quoted inside.</div>
+      </article>
+    </div>
+  </article>
+</div>`
+
+	got := scrapeFixture(t, page, 10)
+	if len(got) != 1 {
+		t.Fatalf("read %d, want 1", len(got))
+	}
+	if got[0].PostText != "The post Alice liked." {
+		t.Errorf("post text %q, want the post the event concerns", got[0].PostText)
+	}
+	for _, a := range got[0].Actors {
+		if a.Handle == "quoted" {
+			t.Errorf("the quoted post's author was counted as an actor: %+v", got[0].Actors)
+		}
+	}
+}
+
+// The post is taken off the end of the text, not replaced within it. X renders the
+// post beneath the event, and the post's words can also appear in the event: a
+// like on a post that reads "your post" must not lose that phrase from the
+// sentence describing it.
+func TestPostTextIsRemovedFromTheEndNotTheMiddle(t *testing.T) {
+	page := `
+<div data-testid="cellInnerDiv">
+  <div data-testid="notification" role="article">
+    <div data-testid="UserAvatar-Container-alice"></div>
+    <span>Alice liked your post</span>
+    <time datetime="2026-08-05T10:00:00.000Z">1h</time>
+    <div data-testid="tweetText">your post</div>
+  </div>
+</div>`
+
+	got := scrapeFixture(t, page, 10)
+	if len(got) != 1 {
+		t.Fatalf("read %d, want 1", len(got))
+	}
+	if !strings.Contains(got[0].Text, "Alice liked your post") {
+		t.Errorf("text is %q; the event lost the phrase that also appears in the post", got[0].Text)
+	}
+	if got[0].PostText != "your post" {
+		t.Errorf("post text %q, want %q", got[0].PostText, "your post")
 	}
 }
