@@ -16,6 +16,7 @@ import (
 	"github.com/SohrabZ/x-browser-mcp/internal/auth"
 	"github.com/SohrabZ/x-browser-mcp/internal/browser"
 	"github.com/SohrabZ/x-browser-mcp/internal/limit"
+	"github.com/SohrabZ/x-browser-mcp/internal/pool"
 	"github.com/SohrabZ/x-browser-mcp/internal/xui"
 )
 
@@ -34,9 +35,13 @@ const (
 // Opener starts a browser session against the persistent profile.
 type Opener func(ctx context.Context, headless bool) (*browser.Session, error)
 
-// Evictor releases the shared browser so a write can take the profile.
-type Evictor interface {
-	Evict(ctx context.Context) error
+// Reserver takes exclusive use of the profile.
+//
+// A write runs in its own visible browser, and only one Chrome may hold a
+// user-data-dir, so the reservation is held for the whole action rather than
+// released once the browser has started.
+type Reserver interface {
+	Reserve(ctx context.Context) (pool.Reservation, error)
 }
 
 // Writer performs mutating actions.
@@ -46,7 +51,7 @@ type Writer struct {
 	gate    *Gate
 	budget  *limit.Budget
 	audit   *Auditor
-	evict   Evictor
+	reserve Reserver
 	timeout time.Duration
 
 	// onChange lets the reader drop cached results after a successful write.
@@ -60,7 +65,7 @@ type Options struct {
 	Gate     *Gate
 	Budget   *limit.Budget
 	Audit    *Auditor
-	Evict    Evictor
+	Reserve  Reserver
 	Timeout  time.Duration
 	OnChange func()
 }
@@ -73,7 +78,7 @@ func New(opts Options) *Writer {
 		gate:     opts.Gate,
 		budget:   opts.Budget,
 		audit:    opts.Audit,
-		evict:    opts.Evict,
+		reserve:  opts.Reserve,
 		timeout:  opts.Timeout,
 		onChange: opts.OnChange,
 	}
@@ -188,11 +193,14 @@ func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func
 	defer cancel()
 
 	// A write needs its own visible browser, and only one Chrome may hold the
-	// profile, so the warm reader browser has to be handed back first.
-	if w.evict != nil {
-		if err := w.evict.Evict(ctx); err != nil {
+	// profile. The reservation is held until the action finishes, so a read
+	// cannot warm a second browser on the directory mid-write.
+	if w.reserve != nil {
+		reservation, err := w.reserve.Reserve(ctx)
+		if err != nil {
 			return w.fail(rec, err)
 		}
+		defer reservation.Release()
 	}
 
 	// Writes run in a visible browser: X guards its compose and engagement

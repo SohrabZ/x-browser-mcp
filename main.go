@@ -105,7 +105,7 @@ func run() error {
 		StatusTTL:    cfg.StatusTTL,
 		LoginTimeout: cfg.LoginTimeout,
 		Lease:        lease,
-		Evict:        browsers,
+		Reserve:      browsers,
 		LaunchLogin:  loginLauncher(cfg),
 	})
 
@@ -127,7 +127,7 @@ func run() error {
 		Gate:    gate,
 		Budget:  limit.New(pace(cfg.WritePace)),
 		Audit:   write.NewAuditor(cfg.AuditLogPath()),
-		Evict:   browsers,
+		Reserve: browsers,
 		Timeout: cfg.FetchTimeout,
 	})
 

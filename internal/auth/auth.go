@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/SohrabZ/x-browser-mcp/internal/browser"
+	"github.com/SohrabZ/x-browser-mcp/internal/pool"
 	"github.com/SohrabZ/x-browser-mcp/internal/xui"
 )
 
@@ -37,12 +38,13 @@ type Status struct {
 // Lease borrows a browser session and returns a function that hands it back.
 type Lease func(ctx context.Context) (*browser.Session, func(), error)
 
-// Evictor releases the shared browser so something else can take the profile.
+// Reserver takes exclusive use of the profile.
 //
-// Only one Chrome may hold a user-data-dir, so the interactive login window
-// cannot open while a warm browser is still holding it.
-type Evictor interface {
-	Evict(ctx context.Context) error
+// Only one Chrome may hold a user-data-dir. The login window needs it for as
+// long as the user is signing in, so the reservation is held until that window
+// closes rather than released as soon as it opens.
+type Reserver interface {
+	Reserve(ctx context.Context) (pool.Reservation, error)
 }
 
 // LoginLauncher opens a visible browser for the user to sign in with. It
@@ -56,7 +58,7 @@ type Options struct {
 	LoginTimeout time.Duration
 
 	Lease       Lease
-	Evict       Evictor
+	Reserve     Reserver
 	LaunchLogin LoginLauncher
 }
 
@@ -81,6 +83,10 @@ type attempt struct {
 	cmd      *exec.Cmd
 	done     <-chan error
 	deadline time.Time
+
+	// profile is held for the whole sign-in, so no read can warm a browser on
+	// the profile while the login window has it.
+	profile pool.Reservation
 }
 
 // New builds a Manager.
@@ -248,18 +254,25 @@ func (m *Manager) StartLogin(ctx context.Context) (time.Time, error) {
 	}
 	m.mu.Unlock()
 
-	// The login window needs the profile, which a warm browser is holding.
-	if m.opts.Evict != nil {
-		evictCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err := m.opts.Evict.Evict(evictCtx)
+	// Take the profile before opening the window, and keep it until the window
+	// closes. Releasing it early would let the next read start a second Chrome
+	// on the directory the user is signing in to.
+	var reservation pool.Reservation
+	if m.opts.Reserve != nil {
+		reserveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		got, err := m.opts.Reserve.Reserve(reserveCtx)
 		cancel()
 		if err != nil {
-			return time.Time{}, fmt.Errorf("release browser for login: %w", err)
+			return time.Time{}, fmt.Errorf("reserve profile for login: %w", err)
 		}
+		reservation = got
 	}
 
 	cmd, err := m.opts.LaunchLogin()
 	if err != nil {
+		if reservation != nil {
+			reservation.Release()
+		}
 		return time.Time{}, fmt.Errorf("open login browser: %w", err)
 	}
 
@@ -267,6 +280,7 @@ func (m *Manager) StartLogin(ctx context.Context) (time.Time, error) {
 		cmd:      cmd,
 		done:     waitFor(cmd),
 		deadline: m.now().Add(m.opts.LoginTimeout),
+		profile:  reservation,
 	}
 
 	m.mu.Lock()
@@ -297,6 +311,11 @@ func (m *Manager) watch(att *attempt) {
 	}
 	m.cached = nil
 	m.mu.Unlock()
+
+	// The window is gone, so reads may have the profile back.
+	if att.profile != nil {
+		att.profile.Release()
+	}
 }
 
 func waitFor(cmd *exec.Cmd) <-chan error {
