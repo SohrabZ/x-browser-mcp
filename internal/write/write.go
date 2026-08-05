@@ -6,7 +6,6 @@ package write
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -179,7 +178,7 @@ func (w *Writer) Repost(ctx context.Context, handle, postID, confirm string) err
 			return err
 		}
 		if !hasOnPost(p, postID, xui.SelUnrepostButton, engagementWait) {
-			return errors.New("repost did not take effect: X never showed it as applied")
+			return notApplied("repost did not take effect: X never showed it as applied")
 		}
 		settled()
 
@@ -232,7 +231,7 @@ func (w *Writer) tap(ctx context.Context, action, handle, postID, confirm, butto
 		// is torn down immediately after this returns, which is enough to lose
 		// a request still in flight. Wait for the control to flip.
 		if !hasOnPost(p, postID, alreadyDone, engagementWait) {
-			return fmt.Errorf("%s did not take effect: X never showed it as applied", action)
+			return notApplied("%s did not take effect: X never showed it as applied", action)
 		}
 		// The control flipping is not the action either. X updates it
 		// optimistically, before its request has completed, so anything that
@@ -271,7 +270,7 @@ func confirmApplied(p *browser.Page, target, postID, alreadyDone, action string)
 		return fmt.Errorf("confirm %s: %w", action, err)
 	}
 	if !hasOnPost(p, postID, alreadyDone, engagementWait) {
-		return fmt.Errorf("%s did not stick: X did not show it as applied after reloading the post", action)
+		return notApplied("%s did not stick: X did not show it as applied after reloading the post", action)
 	}
 	return nil
 }
@@ -450,6 +449,19 @@ func (w *Writer) fail(rec Record, err error) error {
 	rec.Reason = err.Error()
 	_ = w.audit.Log(rec)
 	return err
+}
+
+// NotAppliedError marks an action that was carried out and that X did not apply.
+//
+// Distinct from a fault: the machinery worked, so what it says is an answer the
+// caller can act on rather than a detail of this process. It says only what X
+// showed, and carries nothing else.
+type NotAppliedError struct{ Reason string }
+
+func (e *NotAppliedError) Error() string { return e.Reason }
+
+func notApplied(format string, a ...any) error {
+	return &NotAppliedError{Reason: fmt.Sprintf(format, a...)}
 }
 
 // InvalidError marks a request the caller got wrong, as distinct from a write

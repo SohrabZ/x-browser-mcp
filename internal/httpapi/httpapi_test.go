@@ -294,7 +294,10 @@ func TestAFailedWriteReportsWhyAndBlamesTheRightSide(t *testing.T) {
 		{"writes off", write.ErrDisabled, http.StatusForbidden},
 		{"not signed in", auth.ErrLoginRequired, http.StatusPreconditionFailed},
 		{"bad input", &write.InvalidError{Reason: "post text is required"}, http.StatusBadRequest},
-		{"X dropped it", errors.New("like did not stick"), http.StatusBadGateway},
+		{"X dropped it", &write.NotAppliedError{Reason: "like did not stick"}, http.StatusBadGateway},
+		// A plain error from anywhere is a fault of this process until it is
+		// classified, so its text is not the caller's to read.
+		{"unclassified", errors.New("cdp connection closed"), http.StatusInternalServerError},
 	}
 
 	for _, c := range cases {
@@ -309,8 +312,12 @@ func TestAFailedWriteReportsWhyAndBlamesTheRightSide(t *testing.T) {
 		}
 		var body struct{ Error string }
 		_ = json.Unmarshal(rec.Body.Bytes(), &body)
-		if body.Error != c.err.Error() {
-			t.Errorf("%s: reported %q, want the reason %q", c.name, body.Error, c.err.Error())
+		want := c.err.Error()
+		if c.status == http.StatusInternalServerError {
+			want = "internal error"
+		}
+		if body.Error != want {
+			t.Errorf("%s: reported %q, want %q", c.name, body.Error, want)
 		}
 	}
 }
@@ -363,7 +370,7 @@ func TestFailuresTheCallerCanActOnSayWhatTheyWere(t *testing.T) {
 		{"shutting down", pool.ErrClosed,
 			http.StatusServiceUnavailable, pool.ErrClosed.Error()},
 		{"too slow", context.DeadlineExceeded,
-			http.StatusGatewayTimeout, "the read did not finish in time"},
+			http.StatusGatewayTimeout, "the request did not finish in time"},
 	}
 
 	for _, c := range cases {

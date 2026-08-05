@@ -159,7 +159,7 @@ func run() error {
 		Auth:   authManager,
 		Reader: reader,
 		Writer: writer,
-		MCP:    mcpapi.Server(mcpapi.Deps{Auth: authManager, Reader: reader, Writer: writer}),
+		MCP:    mcpapi.Server(mcpapi.Deps{Auth: authManager, Reader: reader, Writer: writer, Log: log}),
 		Log:    log,
 	})
 
