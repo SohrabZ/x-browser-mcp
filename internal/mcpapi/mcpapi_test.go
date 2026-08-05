@@ -2,6 +2,8 @@ package mcpapi
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -275,4 +277,150 @@ func TestErrorResultIsMarkedAsAnError(t *testing.T) {
 	if len(res.Content) == 0 {
 		t.Fatal("error results should carry a message")
 	}
+}
+
+// fakeActions records which action a tool reached for.
+type fakeActions struct {
+	calls []string
+	err   error
+}
+
+func (f *fakeActions) Enabled() bool { return true }
+
+func (f *fakeActions) record(call string) error {
+	f.calls = append(f.calls, call)
+	return f.err
+}
+
+func (f *fakeActions) Post(_ context.Context, text, confirm string) error {
+	return f.record(fmt.Sprintf("post text=%q confirm=%q", text, confirm))
+}
+
+func (f *fakeActions) Reply(_ context.Context, handle, postID, text, confirm string) error {
+	return f.record(fmt.Sprintf("reply %s/%s text=%q confirm=%q", handle, postID, text, confirm))
+}
+
+func (f *fakeActions) Like(_ context.Context, handle, postID, confirm string) error {
+	return f.record(fmt.Sprintf("like %s/%s confirm=%q", handle, postID, confirm))
+}
+
+func (f *fakeActions) Repost(_ context.Context, handle, postID, confirm string) error {
+	return f.record(fmt.Sprintf("repost %s/%s confirm=%q", handle, postID, confirm))
+}
+
+func (f *fakeActions) Bookmark(_ context.Context, handle, postID, confirm string) error {
+	return f.record(fmt.Sprintf("bookmark %s/%s confirm=%q", handle, postID, confirm))
+}
+
+func (f *fakeActions) Unbookmark(_ context.Context, handle, postID, confirm string) error {
+	return f.record(fmt.Sprintf("unbookmark %s/%s confirm=%q", handle, postID, confirm))
+}
+
+// callTool invokes a tool the way a client does, so the assertion covers the
+// wiring from the advertised name through to the action.
+func callTool(t *testing.T, deps Deps, name string, args map[string]any) *mcp.CallToolResult {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+
+	server := Server(deps)
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("connect server: %v", err)
+	}
+	defer serverSession.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("connect client: %v", err)
+	}
+	defer clientSession.Close()
+
+	res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("call %s: %v", name, err)
+	}
+	return res
+}
+
+// Registration alone would pass with a tool wired to the wrong action --
+// unbookmark_post calling Bookmark advertises and accepts exactly the same way.
+// This pins each tool to the action it names.
+func TestEachWriteToolCallsItsOwnAction(t *testing.T) {
+	post := map[string]any{"handle": "someone", "post_id": "222", "confirm": "tok"}
+
+	cases := []struct {
+		tool string
+		args map[string]any
+		want string
+		says string
+	}{
+		{"post_to_x", map[string]any{"text": "hello", "confirm": "tok"},
+			`post text="hello" confirm="tok"`, "Posted."},
+		{"reply_to_post", map[string]any{"handle": "someone", "post_id": "222", "text": "hi", "confirm": "tok"},
+			`reply someone/222 text="hi" confirm="tok"`, "Replied."},
+		{"like_post", post, `like someone/222 confirm="tok"`, "Liked."},
+		{"repost_post", post, `repost someone/222 confirm="tok"`, "Reposted."},
+		{"bookmark_post", post, `bookmark someone/222 confirm="tok"`, "Bookmarked."},
+		{"unbookmark_post", post, `unbookmark someone/222 confirm="tok"`, "Removed from bookmarks."},
+	}
+
+	for _, c := range cases {
+		writer := &fakeActions{}
+		res := callTool(t, Deps{Writer: writer}, c.tool, c.args)
+
+		if res.IsError {
+			t.Errorf("%s: reported an error: %v", c.tool, res.Content)
+			continue
+		}
+		if len(writer.calls) != 1 || writer.calls[0] != c.want {
+			t.Errorf("%s called %v, want [%s]", c.tool, writer.calls, c.want)
+			continue
+		}
+		if got := textOf(t, res); got != c.says {
+			t.Errorf("%s said %q, want %q", c.tool, got, c.says)
+		}
+	}
+}
+
+// A refused or failed write has to come back as an error the model can see,
+// not as a success with an apology in the text.
+func TestAFailedWriteToolReportsAnError(t *testing.T) {
+	writer := &fakeActions{err: errors.New("like did not stick")}
+	res := callTool(t, Deps{Writer: writer},
+		"like_post", map[string]any{"handle": "someone", "post_id": "222", "confirm": "tok"})
+
+	if !res.IsError {
+		t.Fatal("a failed write must be marked as an error")
+	}
+	if got := textOf(t, res); !strings.Contains(got, "like did not stick") {
+		t.Errorf("reported %q, want the reason", got)
+	}
+}
+
+// The version a client is told is read from the build, so it cannot go stale
+// the way a written-down one did -- it said 0.0.4 for three releases.
+func TestTheAdvertisedVersionIsNotHardcoded(t *testing.T) {
+	if v := version(); v == "" {
+		t.Fatal("version must not be empty")
+	}
+	if v := version(); v == "0.0.4" {
+		t.Errorf("version %q looks like the hardcoded one this replaced", v)
+	}
+}
+
+func textOf(t *testing.T, res *mcp.CallToolResult) string {
+	t.Helper()
+
+	var out strings.Builder
+	for _, c := range res.Content {
+		if text, ok := c.(*mcp.TextContent); ok {
+			out.WriteString(text.Text)
+		}
+	}
+	return out.String()
 }

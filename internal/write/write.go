@@ -35,6 +35,25 @@ const (
 	ActionUnbookmark = "unbookmark"
 )
 
+// Actions is the mutating surface a transport needs.
+//
+// It exists so the MCP tools and the HTTP routes can be tested without a
+// browser. What those layers are responsible for is decoding a request and
+// calling the right action, and a real Writer makes exactly that impossible to
+// assert -- every call would drive Chrome at X.
+type Actions interface {
+	Enabled() bool
+	Post(ctx context.Context, text, confirm string) error
+	Reply(ctx context.Context, handle, postID, text, confirm string) error
+	Like(ctx context.Context, handle, postID, confirm string) error
+	Repost(ctx context.Context, handle, postID, confirm string) error
+	Bookmark(ctx context.Context, handle, postID, confirm string) error
+	Unbookmark(ctx context.Context, handle, postID, confirm string) error
+}
+
+// Writer implements it.
+var _ Actions = (*Writer)(nil)
+
 // Opener starts a browser session against the persistent profile.
 type Opener func(ctx context.Context, headless bool) (*browser.Session, error)
 

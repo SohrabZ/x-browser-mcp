@@ -4,6 +4,7 @@ package mcpapi
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 type Deps struct {
 	Auth   *auth.Manager
 	Reader *read.Reader
-	Writer *write.Writer
+	Writer write.Actions
 }
 
 // Server builds an MCP server exposing the read tools, plus the write tools
@@ -32,7 +33,7 @@ type Deps struct {
 func Server(deps Deps) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "x-browser-mcp",
-		Version: "0.0.4",
+		Version: version(),
 	}, nil)
 
 	registerRead(s, deps)
@@ -40,6 +41,20 @@ func Server(deps Deps) *mcp.Server {
 		registerWrite(s, deps)
 	}
 	return s
+}
+
+// version is what the server tells clients it is.
+//
+// Read from the build rather than written down, because a hardcoded one goes
+// stale the moment a tag is cut and nothing fails when it does -- this said
+// 0.0.4 for three releases. A build with no version stamp, which is what `go
+// build` from a checkout produces, reports itself as such.
+func version() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok || info.Main.Version == "" || info.Main.Version == "(devel)" {
+		return "dev"
+	}
+	return strings.TrimPrefix(info.Main.Version, "v")
 }
 
 // untrustedNotice prefixes every batch of post text handed back to a model.

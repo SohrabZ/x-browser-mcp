@@ -23,25 +23,9 @@ import (
 type Deps struct {
 	Auth   *auth.Manager
 	Reader *read.Reader
-	Writer Writer
+	Writer write.Actions
 	MCP    *mcp.Server
 	Log    *slog.Logger
-}
-
-// Writer is the mutating half of the API.
-//
-// It is an interface rather than *write.Writer so the routes can be tested
-// without a browser: what these handlers are responsible for is decoding a body
-// and calling the right action, and that is exactly what a real browser makes
-// impossible to assert.
-type Writer interface {
-	Enabled() bool
-	Post(ctx context.Context, text, confirm string) error
-	Reply(ctx context.Context, handle, postID, text, confirm string) error
-	Like(ctx context.Context, handle, postID, confirm string) error
-	Repost(ctx context.Context, handle, postID, confirm string) error
-	Bookmark(ctx context.Context, handle, postID, confirm string) error
-	Unbookmark(ctx context.Context, handle, postID, confirm string) error
 }
 
 // maxBody caps request bodies. The endpoints take a handful of small fields, so
