@@ -1,6 +1,10 @@
 # x-browser-mcp
 
-[![CI](https://github.com/SohrabZ/x-browser-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/SohrabZ/x-browser-mcp/actions/workflows/ci.yml)
+<p align="left">
+  <a href="https://github.com/SohrabZ/x-browser-mcp/actions/workflows/ci.yml"><img src="https://github.com/SohrabZ/x-browser-mcp/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/SohrabZ/x-browser-mcp/blob/main/LICENSE.md"><img src="https://img.shields.io/badge/License-MIT-%233fb950?labelColor=32383f" alt="License"></a>
+  <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?labelColor=32383f&logo=go&logoColor=white" alt="Go 1.25+">
+</p>
 
 Read and post to X from your own logged-in browser session, exposed to local AI
 agents over MCP.
@@ -8,6 +12,43 @@ agents over MCP.
 No X API keys, no developer account, no per-request billing. The server drives a
 dedicated Chrome profile that you sign into once, so it sees exactly what you
 see.
+
+```
+Agent ──MCP──▶ x-browser-mcp ──CDP──▶ Chrome (your profile) ──▶ x.com
+```
+
+## Installation methods
+
+[![Claude Code](https://img.shields.io/badge/Claude_Code-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](#claude-code)
+[![Hermes](https://img.shields.io/badge/Hermes-6e40c9?style=for-the-badge&logo=probot&logoColor=white)](#hermes)
+[![Any MCP client](https://img.shields.io/badge/Any_MCP_client-008fe2?style=for-the-badge&logo=googlechrome&logoColor=white)](#anything-else)
+[![From source](https://img.shields.io/badge/From_source-ffdc53?style=for-the-badge&logo=go&logoColor=32383f)](#quick-start)
+
+## Usage examples
+
+Once connected, ask your agent in plain language:
+
+```
+What are people saying on my X timeline this morning?
+```
+
+```
+Search X for "model context protocol" and summarize the debate
+```
+
+```
+Read @golang's recent posts and tell me what shipped in 1.25
+```
+
+```
+Pull up that thread from @simonw and summarize the replies
+```
+
+With `-allow-writes` enabled:
+
+```
+Reply to that post with a link to my benchmark — the token is 3f9a1c04e77b2d18
+```
 
 ## Why
 
@@ -91,21 +132,25 @@ Point a streamable-HTTP MCP client at `http://127.0.0.1:18110/mcp`, or use
 
 ## Tools
 
-| Tool                 | Purpose                                   |
-| -------------------- | ----------------------------------------- |
-| `check_login_status` | is the local session signed in            |
-| `start_login`        | open a browser window to sign in          |
-| `read_home_timeline` | the signed-in home timeline               |
-| `search_x`           | search recent posts (`latest` or `top`)   |
-| `read_user_posts`    | one account's posts                       |
-| `read_thread`        | a post and its replies                    |
-| `read_bookmarks`     | your saved posts                          |
-| `read_list`          | a list timeline                           |
-| `post_to_x`          | publish a post *(writes only)*            |
-| `reply_to_post`      | reply to a post *(writes only)*           |
-| `like_post`          | like a post *(writes only)*               |
-| `repost_post`        | repost a post *(writes only)*             |
-| `bookmark_post`      | save a post *(writes only)*               |
+| Tool                 | Purpose                                 | Method              | Enabled by default |
+| -------------------- | --------------------------------------- | ------------------- | ------------------ |
+| `check_login_status` | is the local session signed in          | cookies + DOM       | yes                |
+| `start_login`        | open a browser window to sign in        | launches Chrome     | yes                |
+| `read_home_timeline` | the signed-in home timeline             | browser DOM parsing | yes                |
+| `search_x`           | search recent posts (`latest` or `top`) | browser DOM parsing | yes                |
+| `read_user_posts`    | one account's posts                     | browser DOM parsing | yes                |
+| `read_thread`        | a post and its replies                  | browser DOM parsing | yes                |
+| `read_bookmarks`     | your saved posts                        | browser DOM parsing | yes                |
+| `read_list`          | a list timeline                         | browser DOM parsing | yes                |
+| `post_to_x`          | publish a post                          | browser automation  | **no** — `-allow-writes` |
+| `reply_to_post`      | reply to a post                         | browser automation  | **no** — `-allow-writes` |
+| `like_post`          | like a post                             | browser automation  | **no** — `-allow-writes` |
+| `repost_post`        | repost a post                           | browser automation  | **no** — `-allow-writes` |
+| `bookmark_post`      | save a post                             | browser automation  | **no** — `-allow-writes` |
+
+> [!NOTE]
+> When writes are disabled the five write tools are not registered at all, so a
+> connected model cannot see or call them. See [Writing](#writing).
 
 ## HTTP API
 
