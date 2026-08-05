@@ -955,18 +955,21 @@ func (c *countingCloseSession) Close() error {
 	return c.fakeSession.Close()
 }
 
-// A reservation that fails because the browser would not confirm its exit must
-// leave that fact behind. Exclusivity is a promise that nothing else holds the
-// profile, and the next caller has no way to re-derive a shutdown it did not
-// witness -- so if the failure is forgotten, the promise gets made anyway.
-func TestAFailedShutdownBlocksTheNextReservationToo(t *testing.T) {
+// A shutdown that could not be confirmed is reported to the caller who asked
+// for the profile -- but it must not become a permanent state. Chrome exits
+// eventually, and a pool that remembered the failure would refuse every
+// reservation from then on, leaving sign-in and writes unavailable until a
+// restart.
+func TestAnUnconfirmedShutdownIsNotRememberedForever(t *testing.T) {
 	wedged := errors.New("chrome did not exit; it may still hold the profile")
+	var refuse atomic.Bool
+	refuse.Store(true)
+
 	p := New(func(context.Context) (Session, error) {
-		return &stubborn{err: wedged}, nil
+		return &stubborn{refuse: &refuse, err: wedged}, nil
 	}, time.Minute)
 	defer p.Close()
 
-	// Warm a session, then reserve: the shutdown cannot be confirmed.
 	lease, err := p.Acquire(t.Context())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
@@ -977,17 +980,34 @@ func TestAFailedShutdownBlocksTheNextReservationToo(t *testing.T) {
 		t.Fatalf("first reserve: got %v, want the unconfirmed shutdown", err)
 	}
 
-	// Nothing has proven the profile free since. The second caller must not be
-	// told it has exclusive use of a directory some surviving Chrome owns.
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	if _, err := p.Reserve(ctx); !errors.Is(err, wedged) {
-		t.Fatalf("second reserve: got %v, want the same unconfirmed shutdown", err)
+	// The browser has since gone. Nothing about the earlier failure may outlive
+	// it: whether the profile is free is a question about now.
+	refuse.Store(false)
+
+	lease, err = p.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("acquire after the browser exited: %v", err)
 	}
+	lease.Release()
+
+	res, err := p.Reserve(t.Context())
+	if err != nil {
+		t.Fatalf("a later reservation must not inherit the old failure: %v", err)
+	}
+	res.Release()
 }
 
-// stubborn is a session whose shutdown never confirms.
-type stubborn struct{ err error }
+// stubborn is a session whose shutdown does not confirm until refuse is cleared.
+type stubborn struct {
+	refuse *atomic.Bool
+	err    error
+}
 
-func (s *stubborn) Close() error               { return s.err }
+func (s *stubborn) Close() error {
+	if s.refuse.Load() {
+		return s.err
+	}
+	return nil
+}
+
 func (s *stubborn) Alive(context.Context) bool { return true }

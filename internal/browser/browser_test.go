@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -74,6 +73,18 @@ func TestLauncherIsPureConfiguration(t *testing.T) {
 	}
 }
 
+// lockFor writes the profile lock the way Chrome does: this host, that pid.
+func lockFor(t *testing.T, dir string, pid int) {
+	t.Helper()
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("hostname: %v", err)
+	}
+	if err := os.Symlink(fmt.Sprintf("%s-%d", host, pid), filepath.Join(dir, "SingletonLock")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+}
+
 func TestInUseFollowsTheSingletonLock(t *testing.T) {
 	dir := t.TempDir()
 
@@ -83,9 +94,7 @@ func TestInUseFollowsTheSingletonLock(t *testing.T) {
 
 	// Chrome writes this as a symlink to host-pid, and the pid is the whole
 	// point: ownership is the named process being alive, not the file existing.
-	if err := os.Symlink(fmt.Sprintf("host-%d", os.Getpid()), filepath.Join(dir, "SingletonLock")); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	lockFor(t, dir, os.Getpid())
 	if !InUse(dir) {
 		t.Fatal("expected the profile to report as in use")
 	}
@@ -105,9 +114,7 @@ func TestInUseDetectsDanglingLock(t *testing.T) {
 
 func TestClearStaleRemovesLockAndIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.Symlink(fmt.Sprintf("host-%d", os.Getpid()), filepath.Join(dir, "SingletonLock")); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	lockFor(t, dir, os.Getpid())
 
 	if err := ClearStale(dir); err != nil {
 		t.Fatalf("clear: %v", err)
@@ -123,9 +130,7 @@ func TestClearStaleRemovesLockAndIsIdempotent(t *testing.T) {
 
 func TestOpenRefusesAProfileAlreadyInUse(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.Symlink(fmt.Sprintf("host-%d", os.Getpid()), filepath.Join(dir, "SingletonLock")); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	lockFor(t, dir, os.Getpid())
 
 	_, err := Open(t.Context(), Options{
 		ChromePath: "/nonexistent/chrome",
@@ -291,9 +296,7 @@ func TestLockOfALiveProcessIsNotCleared(t *testing.T) {
 	dir := t.TempDir()
 
 	// A lock naming this test process, which is very much alive.
-	if err := os.Symlink("host-"+strconv.Itoa(os.Getpid()), filepath.Join(dir, "SingletonLock")); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	lockFor(t, dir, os.Getpid())
 
 	// Some other pid's shutdown must not touch it.
 	clearLockOwnedBy(dir, os.Getpid()+1)
@@ -396,9 +399,7 @@ func TestStaleLockDoesNotHoldTheProfile(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	dead := cmd.Process.Pid
-	if err := os.Symlink(fmt.Sprintf("somehost-%d", dead), filepath.Join(dir, "SingletonLock")); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	lockFor(t, dir, dead)
 
 	if InUse(dir) {
 		t.Fatal("a lock naming a dead process must not hold the profile")
@@ -416,9 +417,7 @@ func TestLiveLockHoldsTheProfile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill() })
 
-	if err := os.Symlink(fmt.Sprintf("somehost-%d", cmd.Process.Pid), filepath.Join(dir, "SingletonLock")); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	lockFor(t, dir, cmd.Process.Pid)
 
 	if !InUse(dir) {
 		t.Fatal("a lock naming a running process must hold the profile")
@@ -472,13 +471,31 @@ func TestSurvivingStartupKeepsTheProfileClaimed(t *testing.T) {
 // Claiming must never overwrite a record of someone else's ownership.
 func TestClaimDoesNotStealAnExistingLock(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.Symlink("somehost-4242", filepath.Join(dir, "SingletonLock")); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
+	lockFor(t, dir, 4242)
 	claimLock(dir, 9999)
 
 	owner, known := lockOwner(dir)
 	if !known || owner != 4242 {
 		t.Fatalf("got owner %d (known %v); the original claim must stand", owner, known)
+	}
+}
+
+// A pid only means something on the host that issued it. If the profile lives
+// on shared storage, another machine's Chrome may hold it, and testing that pid
+// locally answers a question nobody asked.
+func TestALockFromAnotherHostIsHeld(t *testing.T) {
+	dir := t.TempDir()
+
+	// A pid that is certainly not running here, attributed to another machine.
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if err := os.Symlink(fmt.Sprintf("some-other-host-%d", cmd.Process.Pid), filepath.Join(dir, "SingletonLock")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if !InUse(dir) {
+		t.Fatal("another host's lock must be treated as held, whatever that pid means locally")
 	}
 }

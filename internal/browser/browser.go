@@ -411,8 +411,11 @@ func isTargetLost(err error) bool {
 // is the process it names still being alive. A lock naming a dead process is
 // stale and the profile is free.
 //
-// An unreadable or unparseable lock is treated as in use. Refusing to start is
-// recoverable; two Chromes on one profile is not.
+// An unreadable lock, or one issued by another host, is treated as in use.
+// That is the safe direction throughout: refusing to start is recoverable and
+// self-clearing, while two Chromes on one profile corrupts it. The same applies
+// to the one way this can be wrong -- an exited Chrome whose pid has since been
+// reused -- which reads as held until that process ends.
 func InUse(profileDir string) bool {
 	pid, known := lockOwner(profileDir)
 	switch {
@@ -426,7 +429,12 @@ func InUse(profileDir string) bool {
 }
 
 // lockOwner reports the process named by the profile lock. known is false when
-// there is no lock; pid is zero when there is one but it cannot be parsed.
+// there is no lock; pid is zero when there is one but it cannot be read as a
+// process on this machine.
+//
+// The lock names a host as well as a pid, and a pid only means something on the
+// host that issued it. A profile on shared storage can be held by a Chrome
+// elsewhere, and testing that pid locally would answer a question nobody asked.
 func lockOwner(profileDir string) (pid int, known bool) {
 	target, err := os.Readlink(lockPath(profileDir))
 	if err != nil {
@@ -438,6 +446,9 @@ func lockOwner(profileDir string) (pid int, known bool) {
 	i := strings.LastIndex(target, "-")
 	if i < 0 {
 		return 0, true
+	}
+	if host, err := os.Hostname(); err == nil && target[:i] != host {
+		return 0, true // another machine's claim: not ours to judge
 	}
 	owner, err := strconv.Atoi(target[i+1:])
 	if err != nil || owner <= 0 {

@@ -215,6 +215,15 @@ func browserOpener(cfg config.Config) func(context.Context, bool) (*browser.Sess
 // Chrome flushes cookies and releases the profile lock.
 func loginLauncher(cfg config.Config) func() (*exec.Cmd, error) {
 	return func() (*exec.Cmd, error) {
+		// Everything else reaches Chrome through browser.Open, which refuses a
+		// profile someone already owns. This path does not, so it makes the
+		// same check: a reservation coordinates callers, but the directory is
+		// what decides, and a second Chrome here would corrupt the very profile
+		// the user is signing in to.
+		if browser.InUse(cfg.ProfileDir()) {
+			return nil, fmt.Errorf("%w (%s)", browser.ErrProfileInUse, cfg.ProfileDir())
+		}
+
 		args := []string{
 			"--user-data-dir=" + cfg.ProfileDir(),
 			"--profile-directory=" + cfg.ProfileName,

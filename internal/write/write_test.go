@@ -232,7 +232,11 @@ func TestAnUnconfirmedWriteShutdownHoldsTheProfile(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	t.Cleanup(func() { _ = holder.Process.Kill() })
-	if err := os.Symlink(fmt.Sprintf("host-%d", holder.Process.Pid), filepath.Join(dir, "SingletonLock")); err != nil {
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("hostname: %v", err)
+	}
+	if err := os.Symlink(fmt.Sprintf("%s-%d", host, holder.Process.Pid), filepath.Join(dir, "SingletonLock")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 

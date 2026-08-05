@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -116,11 +117,6 @@ type Pool struct {
 	// be handed out either, so it is held here until the last one drains.
 	retiring Session
 
-	// unreleased records a shutdown that could not confirm the browser exited.
-	// While set, the profile may still be held by a process the pool no longer
-	// tracks, so exclusivity cannot honestly be granted.
-	unreleased error
-
 	// drained wakes waiters when the last lease is returned.
 	drained *sync.Cond
 
@@ -203,11 +199,19 @@ func (p *Pool) beginCloseLocked(s Session) {
 	go func() {
 		err := s.Close()
 
+		if err != nil {
+			// Nothing to record here. Whether the profile is free is decided by
+			// the directory at the moment someone tries to take it, and a flag
+			// kept here could only ever be a stale copy of that -- one that
+			// stays set after the browser finally exits and refuses every
+			// reservation from then on.
+			slog.Warn("pooled browser did not confirm shutdown", "err", err)
+		}
+
 		p.mu.Lock()
 		if p.closing == done {
 			p.closing = nil
 		}
-		p.unreleased = err
 		p.drained.Broadcast()
 		p.mu.Unlock()
 		close(done)
@@ -334,10 +338,6 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 					// browser holding the profile untracked.
 					p.beginCloseLocked(session)
 				default:
-					// Chrome started, so the profile was free: any earlier
-					// shutdown that could not be confirmed has evidently
-					// finished.
-					p.unreleased = nil
 					p.session = session
 					// Only schedule an idle close when warming is on. With
 					// warming off, arming here would retire the browser before
@@ -426,28 +426,19 @@ func (p *Pool) Reserve(ctx context.Context) (Reservation, error) {
 	p.mu.Lock()
 	session := p.session
 	p.session = nil
-	unreleased := p.unreleased
 	p.mu.Unlock()
 
+	// A reservation keeps other callers out; it is not what keeps a second
+	// Chrome off the directory. That is decided when one is started, against
+	// the profile lock, by whoever starts it -- which is why this can report a
+	// shutdown it could not confirm without also having to remember it. If the
+	// old browser really is still there, the caller's own launch will say so,
+	// and it will stop saying so the moment that process ends.
 	if session != nil {
 		if err := session.Close(); err != nil {
-			// Record it on the pool, not just here. A reservation that fails
-			// releases exclusivity, and the next caller must find the same
-			// unconfirmed shutdown waiting rather than a clean slate -- the
-			// browser it could not account for is still out there.
-			unreleased = err
-			p.mu.Lock()
-			p.unreleased = err
-			p.mu.Unlock()
+			p.releaseExclusive(done)
+			return nil, fmt.Errorf("cannot take the profile: %w", err)
 		}
-	}
-
-	// Exclusivity is a promise that nothing else holds the profile. If a
-	// shutdown could not confirm that, say so rather than let a login or write
-	// start against a directory some surviving Chrome still owns.
-	if unreleased != nil {
-		p.releaseExclusive(done)
-		return nil, fmt.Errorf("cannot take the profile: %w", unreleased)
 	}
 	return &exclusive{pool: p, done: done}, nil
 }
