@@ -80,8 +80,9 @@ curl -s -X POST http://127.0.0.1:18110/api/v1/search \
   -H 'Content-Type: application/json' -d '{"query":"golang","limit":5}'
 ```
 
-Each should return real posts. Reads are paced — 15s apart, 8 per 10 minutes —
-so running these back to back may return `429`. That is the limiter working.
+Each should return real posts. Reads are paced — 5s apart, 30 per 10 minutes —
+so a long pass may still return `429`. That is the limiter working, not a bug.
+The budget is in memory, so restarting the server clears it.
 
 ### 3. Image-only threads
 

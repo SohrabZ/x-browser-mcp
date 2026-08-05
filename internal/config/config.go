@@ -45,6 +45,11 @@ type Pace struct {
 	MinInterval time.Duration
 	Window      time.Duration
 	Max         int
+
+	// Jitter spreads the gap over MinInterval..MinInterval+Jitter, so actions
+	// do not arrive at a fixed cadence no human would produce. Used for writes;
+	// reads are not engagement and do not need it.
+	Jitter time.Duration
 }
 
 // Default returns the configuration used when no flags are supplied.
@@ -62,17 +67,25 @@ func Default() Config {
 		StatusTTL: 5 * time.Minute,
 		ResultTTL: 5 * time.Minute,
 
+		// Paced enough that an agent cannot hammer X, loose enough that ordinary
+		// use does not hit it: a single question often costs two or three reads,
+		// and the earlier 8-per-10-minutes ceiling was spent by one test pass.
+		// Cached reads never count, so this only limits live browser fetches.
 		ReadPace: Pace{
-			MinInterval: 15 * time.Second,
+			MinInterval: 5 * time.Second,
 			Window:      10 * time.Minute,
-			Max:         8,
+			Max:         30,
 		},
-		// Writes are rarer, more consequential and less recoverable, so they get
-		// their own much tighter budget rather than sharing the read one.
+		// Writes are paced to look like a person, not an agent. Nobody likes a
+		// post every twenty seconds for an hour, and engagement arriving at a
+		// fixed cadence is a signature on its own -- so the gap is long and
+		// deliberately irregular. Agents are fast; accounts that act fast get
+		// flagged, and that outcome is far worse than a slow reply.
 		WritePace: Pace{
-			MinInterval: 30 * time.Second,
+			MinInterval: 45 * time.Second,
+			Jitter:      75 * time.Second, // actual gap lands in 45s..2m
 			Window:      time.Hour,
-			Max:         5,
+			Max:         6,
 		},
 
 		FetchTimeout: 45 * time.Second,

@@ -43,6 +43,16 @@ func run() error {
 	flag.BoolVar(&cfg.AllowWrites, "allow-writes", cfg.AllowWrites, "enable the write tools (post, reply, like, repost, bookmark)")
 	flag.DurationVar(&cfg.FetchTimeout, "fetch-timeout", cfg.FetchTimeout, "time budget for a single read")
 	flag.DurationVar(&cfg.LoginTimeout, "login-timeout", cfg.LoginTimeout, "how long an interactive login may stay open")
+
+	// Pacing is exposed because the right values depend on how hard you drive
+	// the server. Raising them raises the odds X flags the session.
+	flag.DurationVar(&cfg.ReadPace.MinInterval, "read-interval", cfg.ReadPace.MinInterval, "minimum gap between live reads")
+	flag.DurationVar(&cfg.ReadPace.Window, "read-window", cfg.ReadPace.Window, "rolling window for the read budget")
+	flag.IntVar(&cfg.ReadPace.Max, "read-max", cfg.ReadPace.Max, "maximum live reads per read-window")
+	flag.DurationVar(&cfg.WritePace.MinInterval, "write-interval", cfg.WritePace.MinInterval, "minimum gap between writes")
+	flag.DurationVar(&cfg.WritePace.Window, "write-window", cfg.WritePace.Window, "rolling window for the write budget")
+	flag.IntVar(&cfg.WritePace.Max, "write-max", cfg.WritePace.Max, "maximum writes per write-window")
+	flag.DurationVar(&cfg.WritePace.Jitter, "write-jitter", cfg.WritePace.Jitter, "random extra delay added to the gap between writes")
 	flag.Parse()
 
 	if err := cfg.Validate(); err != nil {
@@ -74,7 +84,7 @@ func run() error {
 	reader := read.New(read.Options{
 		Open:     open,
 		Auth:     authManager,
-		Budget:   limit.New(cfg.ReadPace.MinInterval, cfg.ReadPace.Window, cfg.ReadPace.Max),
+		Budget:   limit.New(pace(cfg.ReadPace)),
 		CacheFor: cfg.ResultTTL,
 		Timeout:  cfg.FetchTimeout,
 	})
@@ -87,7 +97,7 @@ func run() error {
 		Open:    open,
 		Auth:    authManager,
 		Gate:    gate,
-		Budget:  limit.New(cfg.WritePace.MinInterval, cfg.WritePace.Window, cfg.WritePace.Max),
+		Budget:  limit.New(pace(cfg.WritePace)),
 		Audit:   write.NewAuditor(cfg.AuditLogPath()),
 		Timeout: cfg.FetchTimeout,
 	})
@@ -135,6 +145,16 @@ func serve(srv *http.Server, log *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(ctx)
+}
+
+// pace converts a configured pace into limiter parameters.
+func pace(p config.Pace) limit.Params {
+	return limit.Params{
+		MinInterval: p.MinInterval,
+		Window:      p.Window,
+		Max:         p.Max,
+		Jitter:      p.Jitter,
+	}
 }
 
 // browserOpener returns an opener bound to the configured profile.

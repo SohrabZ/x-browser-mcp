@@ -7,6 +7,7 @@ package limit
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -20,29 +21,47 @@ func (e *ExhaustedError) Error() string {
 	return fmt.Sprintf("rate budget exhausted; retry in %s", e.RetryAfter.Round(time.Second))
 }
 
+// Params configures a Budget.
+type Params struct {
+	MinInterval time.Duration
+	Window      time.Duration
+	Max         int
+
+	// Jitter spreads the gap between calls over MinInterval..MinInterval+Jitter.
+	//
+	// A fixed interval is itself a signature: nothing human acts at exactly the
+	// same spacing every time. It matters for actions X can see as engagement,
+	// and not at all for reads.
+	Jitter time.Duration
+}
+
 // Budget enforces a floor between calls and a ceiling within a rolling window.
 type Budget struct {
-	minInterval time.Duration
-	window      time.Duration
-	max         int
+	params Params
 
-	// now is swappable so tests do not have to sleep.
-	now func() time.Time
+	// now and jitterFor are swappable so tests need not sleep or flake.
+	now       func() time.Time
+	jitterFor func(time.Duration) time.Duration
 
 	mu      sync.Mutex
 	last    time.Time
 	history []time.Time
 }
 
-// New builds a budget allowing at most max calls per window, spaced at least
-// minInterval apart.
-func New(minInterval, window time.Duration, max int) *Budget {
+// New builds a budget from p.
+func New(p Params) *Budget {
 	return &Budget{
-		minInterval: minInterval,
-		window:      window,
-		max:         max,
-		now:         time.Now,
+		params:    p,
+		now:       time.Now,
+		jitterFor: randomJitter,
 	}
+}
+
+func randomJitter(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(max)))
 }
 
 // Wait blocks until the caller may proceed, then records the call.
@@ -82,9 +101,9 @@ func (b *Budget) reserve() (time.Duration, error) {
 	now := b.now()
 	b.prune(now)
 
-	if b.max > 0 && len(b.history) >= b.max {
+	if b.params.Max > 0 && len(b.history) >= b.params.Max {
 		oldest := b.history[0]
-		retry := oldest.Add(b.window).Sub(now)
+		retry := oldest.Add(b.params.Window).Sub(now)
 		if retry < 0 {
 			retry = 0
 		}
@@ -92,7 +111,8 @@ func (b *Budget) reserve() (time.Duration, error) {
 	}
 
 	if !b.last.IsZero() {
-		if wait := b.minInterval - now.Sub(b.last); wait > 0 {
+		gap := b.params.MinInterval + b.jitterFor(b.params.Jitter)
+		if wait := gap - now.Sub(b.last); wait > 0 {
 			return wait, nil
 		}
 	}
@@ -104,11 +124,11 @@ func (b *Budget) reserve() (time.Duration, error) {
 
 // prune drops calls that have aged out of the window.
 func (b *Budget) prune(now time.Time) {
-	if b.window <= 0 {
+	if b.params.Window <= 0 {
 		b.history = b.history[:0]
 		return
 	}
-	cutoff := now.Add(-b.window)
+	cutoff := now.Add(-b.params.Window)
 	kept := b.history[:0]
 	for _, at := range b.history {
 		if at.After(cutoff) {
@@ -124,7 +144,7 @@ func (b *Budget) Remaining() int {
 	defer b.mu.Unlock()
 
 	b.prune(b.now())
-	left := b.max - len(b.history)
+	left := b.params.Max - len(b.history)
 	if left < 0 {
 		return 0
 	}

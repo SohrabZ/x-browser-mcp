@@ -31,8 +31,10 @@ func (c *clock) advance(d time.Duration) {
 }
 
 func budget(c *clock, minInterval, window time.Duration, max int) *Budget {
-	b := New(minInterval, window, max)
+	b := New(Params{MinInterval: minInterval, Window: window, Max: max})
 	b.now = c.now
+	// Deterministic: jitter is exercised by its own tests.
+	b.jitterFor = func(time.Duration) time.Duration { return 0 }
 	return b
 }
 
@@ -171,5 +173,44 @@ func TestConcurrentCallersDoNotBlockOnALockedBudget(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("callers serialised behind a held lock instead of waiting independently")
+	}
+}
+
+// Engagement arriving at a fixed cadence is a signature no human produces, so
+// the gap between writes is spread over a range rather than being constant.
+func TestJitterExtendsTheGapBetweenCalls(t *testing.T) {
+	c := newClock()
+	b := New(Params{MinInterval: time.Minute, Jitter: time.Minute, Window: time.Hour, Max: 10})
+	b.now = c.now
+	b.jitterFor = func(max time.Duration) time.Duration { return max } // worst case
+
+	if err := b.Wait(t.Context()); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	// One minute in, the base interval has passed but the jitter has not.
+	c.advance(90 * time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if err := b.Wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("jitter should still be holding the call, got %v", err)
+	}
+
+	// Past MinInterval+Jitter it proceeds.
+	c.advance(time.Minute)
+	if err := b.Wait(t.Context()); err != nil {
+		t.Fatalf("call should proceed once the jittered gap passes: %v", err)
+	}
+}
+
+func TestRandomJitterStaysInRange(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		got := randomJitter(time.Minute)
+		if got < 0 || got >= time.Minute {
+			t.Fatalf("jitter %s outside [0, 1m)", got)
+		}
+	}
+	if got := randomJitter(0); got != 0 {
+		t.Fatalf("zero jitter must stay zero, got %s", got)
 	}
 }

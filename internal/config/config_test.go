@@ -81,6 +81,23 @@ func TestWriteBudgetIsStricterThanRead(t *testing.T) {
 	}
 }
 
+// The read budget has to survive ordinary use. A single question often costs
+// two or three live reads, and an earlier ceiling of 8 per 10 minutes was spent
+// by one pass over the read tools -- a limiter that normal use trips is a bug,
+// not a safeguard.
+func TestReadBudgetSurvivesARealisticSession(t *testing.T) {
+	cfg := Default()
+
+	if cfg.ReadPace.Max < 20 {
+		t.Errorf("read budget of %d per %s is too tight for ordinary use", cfg.ReadPace.Max, cfg.ReadPace.Window)
+	}
+	// The floor between reads still has to allow a handful in quick succession
+	// when an agent chains a few tool calls to answer one question.
+	if cfg.ReadPace.MinInterval > 10*time.Second {
+		t.Errorf("minimum interval of %s stalls chained tool calls", cfg.ReadPace.MinInterval)
+	}
+}
+
 func TestValidateAcceptsDefaults(t *testing.T) {
 	cfg := Default()
 	if cfg.ChromePath == "" {
@@ -178,5 +195,26 @@ func TestDefaultTimeoutsAreSane(t *testing.T) {
 	}
 	if cfg.LoginTimeout < time.Minute {
 		t.Errorf("login timeout %s leaves no time to type credentials", cfg.LoginTimeout)
+	}
+}
+
+// Writes must look like a person using the account, not an agent driving it.
+// Bursts of engagement at a fixed cadence are what get accounts flagged, and
+// that outcome is far worse than a slow reply.
+func TestWritePaceIsHumanShaped(t *testing.T) {
+	cfg := Default()
+
+	if cfg.WritePace.MinInterval < 30*time.Second {
+		t.Errorf("writes every %s is faster than a person acts", cfg.WritePace.MinInterval)
+	}
+	if cfg.WritePace.Jitter <= 0 {
+		t.Error("a fixed gap between writes is a signature on its own; jitter must be set")
+	}
+	if cfg.WritePace.Max > 12 {
+		t.Errorf("%d writes per %s is more engagement than a person produces", cfg.WritePace.Max, cfg.WritePace.Window)
+	}
+	// Reads are not engagement and are not paced this way.
+	if cfg.ReadPace.Jitter != 0 {
+		t.Error("reads do not need jitter")
 	}
 }

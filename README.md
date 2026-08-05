@@ -225,7 +225,8 @@ token it has never seen.
 
 Also enforced:
 
-- A separate, much tighter budget than reads (5/hour by default)
+- A separate, much tighter budget than reads: 6/hour, at least 45s apart,
+  with randomised spacing so writes do not arrive at a machine cadence
 - An append-only audit log at `~/.x-browser-mcp/writes.log`, recording denials
   as well as successes
 - Nothing destructive — no delete, unfollow, block or DM
@@ -256,6 +257,13 @@ act as you.
 | `-allow-writes`   | `false`             | enable write tools                   |
 | `-fetch-timeout`  | `45s`               | budget for one read                  |
 | `-login-timeout`  | `5m`                | how long a login window stays open   |
+| `-read-interval`  | `5s`                | minimum gap between live reads       |
+| `-read-window`    | `10m`               | rolling window for the read budget   |
+| `-read-max`       | `30`                | maximum live reads per window        |
+| `-write-interval` | `45s`               | minimum gap between writes           |
+| `-write-jitter`   | `1m15s`             | random extra delay between writes    |
+| `-write-window`   | `1h`                | rolling window for the write budget  |
+| `-write-max`      | `6`                 | maximum writes per window            |
 
 `X_BROWSER_MCP_CHROME` overrides Chrome detection.
 
@@ -263,8 +271,11 @@ act as you.
 
 - The first read after an idle period takes 10–20 seconds; it cold-starts
   Chrome. Later reads are cached.
-- Reads are paced deliberately (15s apart, 8 per 10 minutes). Driving a browser
-  at X too eagerly is what gets sessions flagged.
+- Reads are paced (5s apart, 30 per 10 minutes) and cached reads cost nothing.
+  Driving a browser at X too eagerly is what gets sessions flagged.
+- Writes are paced to look like a person, not an agent: at least 45s apart plus
+  a random extra delay, and at most 6 an hour. Engagement arriving at a fixed
+  cadence is a signature on its own.
 - On macOS, do not run this from a `launchd` agent: Chrome cannot reach the
   login Keychain there, so it fails to decrypt the profile cookies and destroys
   your saved session on every run.
