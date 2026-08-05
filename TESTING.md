@@ -194,10 +194,48 @@ curl -s -X POST http://127.0.0.1:18110/mcp \
 
 Only test writes against an account you are willing to post from.
 
+### 7. Writes that actually take effect
+
+The gate checks above pass whether or not a write does anything. Check the
+action separately, and check it the only way that works:
+
+**Never accept the tool's own success report.** A write reports what it did to
+the page, and X's page is not X. Confirm from a fresh page load, in a different
+browser, after the write browser has gone:
+
+```bash
+./x-browser-mcp -allow-writes            # note the confirmation token
+
+hermes -z "Use the x-browser-mcp tool like_post on handle <you>, \
+ postID <a post of yours>, confirm <token>. Report the result verbatim."
+```
+
+Then open the post yourself and look. If the tool said `Liked.` and the post
+shows a like button rather than an unlike button, the tool is lying to you.
+
+Run each of `post_to_x`, `reply_to_post`, `like_post`, `repost_post` and
+`bookmark_post` this way at least once before a release. They fail differently:
+posting works while replying does not, because their composers behave
+differently; liking fails in a way that leaves the page looking correct.
+
+**Why the indirection.** X applies engagement over the network and updates its
+controls optimistically, before the request completes. A check that reads the
+page after the click sees the optimistic state and passes. Worse, anything that
+disturbs the page in that window -- closing the browser, navigating, or
+reloading in order to check -- cancels the request, so an over-eager check
+causes the failure it is looking for. Three consecutive versions of this check
+passed while the like was being silently discarded.
+
+**Do not trust an unchanged UI either.** Undo the action by hand between runs
+(unlike the post, delete the reply). A tool that does nothing looks identical to
+one that correctly detected the action was already applied.
+
 ## Before tagging a release
 
 - All four automated gates pass.
 - The manual pass above runs clean against a live session.
+- Every write tool has been run end to end and confirmed from a separate
+  browser, not from its own success report.
 - The version in `internal/mcpapi` matches the tag.
 
 Never move a published tag. Go's module proxy treats a version as immutable, so
