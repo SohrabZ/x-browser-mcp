@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -195,12 +196,13 @@ func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func
 	// A write needs its own visible browser, and only one Chrome may hold the
 	// profile. The reservation is held until the action finishes, so a read
 	// cannot warm a second browser on the directory mid-write.
+	var reservation pool.Reservation
 	if w.reserve != nil {
-		reservation, err := w.reserve.Reserve(ctx)
+		got, err := w.reserve.Reserve(ctx)
 		if err != nil {
 			return w.fail(rec, err)
 		}
-		defer reservation.Release()
+		reservation = got
 	}
 
 	// Writes run in a visible browser: X guards its compose and engagement
@@ -208,9 +210,14 @@ func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func
 	// both likelier to be refused and impossible for the user to observe.
 	session, err := w.open(ctx, false)
 	if err != nil {
+		releaseProfile(reservation)
 		return w.fail(rec, err)
 	}
-	defer session.Close()
+	// The profile is handed back only once this browser is confirmed gone. Its
+	// shutdown reports whether Chrome actually exited, and releasing on an
+	// unconfirmed one would invite a read onto a directory the write browser
+	// may still hold.
+	defer func() { releaseAfterShutdown(session, reservation) }()
 
 	page, err := session.Page(ctx)
 	if err != nil {
@@ -229,6 +236,46 @@ func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func
 	}
 	return nil
 }
+
+// releaseAfterShutdown closes the write browser and only then hands the profile
+// back.
+//
+// If the browser cannot be confirmed gone, the reservation is kept while a
+// background wait watches for the profile to actually free up. Holding it keeps
+// reads off a directory that may still be owned; the bound keeps a wedged
+// browser from making the service unavailable forever.
+func releaseAfterShutdown(session *browser.Session, reservation pool.Reservation) {
+	err := session.Close()
+	if err == nil {
+		releaseProfile(reservation)
+		return
+	}
+
+	slog.Warn("write browser did not confirm shutdown; holding the profile until it does", "err", err)
+	go func() {
+		defer releaseProfile(reservation)
+
+		deadline := time.Now().Add(unconfirmedHold)
+		for time.Now().Before(deadline) {
+			if session.Alive(context.Background()) {
+				time.Sleep(time.Second)
+				continue
+			}
+			return
+		}
+		slog.Warn("write browser still unconfirmed; releasing the profile anyway", "after", unconfirmedHold)
+	}()
+}
+
+func releaseProfile(reservation pool.Reservation) {
+	if reservation != nil {
+		reservation.Release()
+	}
+}
+
+// unconfirmedHold bounds how long the profile is withheld while waiting on a
+// write browser that would not confirm its exit.
+const unconfirmedHold = 2 * time.Minute
 
 func (w *Writer) fail(rec Record, err error) error {
 	rec.Outcome = OutcomeFailed

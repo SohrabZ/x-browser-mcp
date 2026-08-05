@@ -151,30 +151,40 @@ func (p *Pool) quietLocked() bool {
 	return p.leases == 0 && p.opening == nil && p.closing == nil && p.retiring == nil
 }
 
-// retireLocked takes a session out of service. It is closed once the last lease
-// on it is returned -- closing a browser other callers are mid-read on would
-// turn one bad probe into several failed requests.
+// retireLocked takes a session out of service.
+//
+// It never closes anything itself. Retirement and closing are deliberately
+// separate steps with a single owner: concurrent probes can all fail at once,
+// and if each could start a shutdown the same browser would be torn down
+// several times over, racing its own cleanup and losing the record of whether
+// it actually exited.
 func (p *Pool) retireLocked(s Session) {
-	if s == nil {
+	if s == nil || s == p.retiring {
 		return
 	}
 	if p.session == s {
 		p.session = nil
 	}
-	if p.leases > 0 {
+	if p.retiring == nil {
 		p.retiring = s
 		return
 	}
+	// Another session is already awaiting shutdown, which cannot happen while
+	// the pool holds at most one browser. Close this one directly rather than
+	// drop it.
 	p.beginCloseLocked(s)
 }
 
-// closeRetiredLocked closes a retired session once nothing holds it.
+// closeRetiredLocked starts the one shutdown for a retired session, once no
+// caller is still using it. Closing a browser mid-read would turn one bad probe
+// into several failed requests.
 func (p *Pool) closeRetiredLocked() {
-	if p.retiring != nil && p.leases == 0 {
-		s := p.retiring
-		p.retiring = nil
-		p.beginCloseLocked(s)
+	if p.retiring == nil || p.leases > 0 {
+		return
 	}
+	s := p.retiring
+	p.retiring = nil
+	p.beginCloseLocked(s)
 }
 
 // beginCloseLocked retires a session, tracking the shutdown so nothing opens a
@@ -282,6 +292,7 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 			if !healthy {
 				p.retireLocked(candidate)
 			}
+			// Exactly one place starts the shutdown, once nothing holds it.
 			p.closeRetiredLocked()
 			p.drained.Broadcast()
 			p.mu.Unlock()

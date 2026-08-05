@@ -327,3 +327,57 @@ func TestWaitForExitReportsWhetherItConfirmed(t *testing.T) {
 		t.Error("an exited process should be confirmed gone")
 	}
 }
+
+// A launch that never publishes a debugging URL must not hold the profile claim
+// forever: everything else -- reads, writes, sign-in -- queues behind it.
+func TestLaunchIsBounded(t *testing.T) {
+	// A "browser" that starts and then does nothing is the shape of the hang.
+	script := filepath.Join(t.TempDir(), "wedged.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	original := launchWait
+	launchWait = 2 * time.Second // the real bound is minutes; the point is that one exists
+	t.Cleanup(func() { launchWait = original })
+
+	began := time.Now()
+	_, err := Open(context.Background(), Options{ChromePath: script, Headless: true})
+	elapsed := time.Since(began)
+
+	if err == nil {
+		t.Fatal("expected a wedged launch to fail")
+	}
+	if elapsed > 30*time.Second {
+		t.Fatalf("a wedged launch ran for %s; it must be bounded", elapsed)
+	}
+}
+
+// A connect failure leaves Chrome running, and it owns the profile until it
+// exits. Returning before that would let the next caller start a second one.
+func TestFailedStartupFreesTheProfile(t *testing.T) {
+	chrome := ChromePathForTest()
+	if chrome == "" {
+		t.Skip("no Chrome installed")
+	}
+	dir := t.TempDir()
+
+	// Start and immediately tear down through the same path a failed startup
+	// uses, then confirm the profile is takeable.
+	sess, err := Open(context.Background(), Options{ChromePath: chrome, ProfileDir: dir, Headless: true})
+	if err != nil {
+		t.Skipf("cannot start chrome: %v", err)
+	}
+	if err := sess.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if InUse(dir) {
+		t.Fatal("the profile is still locked after teardown")
+	}
+	replacement, err := Open(context.Background(), Options{ChromePath: chrome, ProfileDir: dir, Headless: true})
+	if err != nil {
+		t.Fatalf("a replacement could not take the profile: %v", err)
+	}
+	_ = replacement.Close()
+}

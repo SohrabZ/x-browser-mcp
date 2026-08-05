@@ -903,3 +903,54 @@ func TestConcurrentProbesDoNotCloseALeasedSession(t *testing.T) {
 		t.Fatal("concurrent probes deadlocked the pool")
 	}
 }
+
+// Concurrent probes can all fail at once. Retirement and shutdown are separate
+// steps with one owner precisely so that produces a single Close: tearing the
+// same browser down several times races its own cleanup and loses the record of
+// whether it actually exited.
+func TestConcurrentFailedProbesCloseTheSessionOnce(t *testing.T) {
+	var closes atomic.Int64
+	doomed := &countingCloseSession{closes: &closes}
+	doomed.dead.Store(true)
+
+	p := New(func(context.Context) (Session, error) {
+		s := &fakeSession{}
+		return s, nil
+	}, time.Minute)
+	defer p.Close()
+
+	p.mu.Lock()
+	p.session = doomed
+	p.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if l, err := p.Acquire(context.Background()); err == nil {
+				l.Release()
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Give any stray shutdown goroutine a chance to double up.
+	time.Sleep(200 * time.Millisecond)
+
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("the retired session was closed %d times; exactly one shutdown may run", got)
+	}
+}
+
+// countingCloseSession records how many times shutdown was started.
+type countingCloseSession struct {
+	fakeSession
+	closes *atomic.Int64
+}
+
+func (c *countingCloseSession) Close() error {
+	c.closes.Add(1)
+	time.Sleep(20 * time.Millisecond) // shutdown takes a moment
+	return c.fakeSession.Close()
+}

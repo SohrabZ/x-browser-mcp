@@ -112,18 +112,27 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 		}
 	}
 
-	l := Launcher(opts)
+	// Bound the launch itself. Chrome can start and then never publish its
+	// debugging URL, and an unbounded wait here would hold the caller's claim on
+	// the profile forever -- nothing else could read, write, or sign in.
+	launchCtx, cancelLaunch := context.WithTimeout(ctx, launchWait)
+	defer cancelLaunch()
+
+	l := Launcher(opts).Context(launchCtx)
+
 	controlURL, err := l.Launch()
 	if err != nil {
+		// Chrome may have started before the failure, so tear down rather than
+		// assume nothing is holding the directory.
+		reap(l, opts, persistent)
 		return nil, fmt.Errorf("launch chrome: %w", err)
 	}
 
 	b := rod.New().ControlURL(controlURL).Context(ctx)
 	if err := b.Connect(); err != nil {
-		l.Kill()
-		if !persistent {
-			go l.Cleanup()
-		}
+		// Chrome is running at this point; it owns the profile until it exits.
+		// Returning before that would let the next caller start a second one.
+		reap(l, opts, persistent)
 		return nil, fmt.Errorf("connect to chrome: %w", err)
 	}
 
@@ -174,6 +183,27 @@ func (s *Session) Alive(ctx context.Context) bool {
 // Cookies returns every cookie the browser currently holds.
 func (s *Session) Cookies() ([]*proto.NetworkCookie, error) {
 	return s.browser.GetCookies()
+}
+
+// launchWait bounds a browser launch. Chrome normally publishes its debugging
+// URL in well under a second; this only stops a wedged start from holding the
+// profile claim indefinitely. It is a variable so tests can shorten it.
+var launchWait = 90 * time.Second
+
+// reap shuts down a browser that failed partway through startup and waits for
+// it to let go of the profile, so the next attempt is not racing a corpse.
+func reap(l *launcher.Launcher, opts Options, persistent bool) {
+	pid := l.PID()
+	l.Kill()
+	exited := waitForExit(pid, exitWait)
+
+	if !persistent {
+		go l.Cleanup()
+		return
+	}
+	if exited && opts.ProfileDir != "" {
+		clearLockOwnedBy(opts.ProfileDir, pid)
+	}
 }
 
 // exitWait bounds how long Close waits for Chrome to actually go away. Chrome
