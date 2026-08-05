@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -86,12 +87,53 @@ type Session struct {
 	release func()
 }
 
-// Open starts Chrome and connects to it.
+// Open starts Chrome and connects to it, using ctx for both how long startup
+// may take and how long the browser lives.
+func Open(ctx context.Context, opts Options) (*Session, error) {
+	return OpenWithin(ctx, ctx, opts)
+}
+
+// OpenWithin starts Chrome with startup bounded separately from lifetime.
+//
+// A pooled browser must outlive the request that happened to warm it, but that
+// request still needs its deadline respected: a stalled launch would otherwise
+// run past the caller's timeout while the pool's opening claim kept every other
+// acquire and reservation waiting behind it.
+//
+// If startup outruns start, the caller is released immediately and the browser
+// is closed in the background once it eventually appears -- abandoning it would
+// leave a Chrome holding the profile with nothing tracking it.
+func OpenWithin(lifetime, start context.Context, opts Options) (*Session, error) {
+	type result struct {
+		session *Session
+		err     error
+	}
+	ch := make(chan result, 1)
+
+	go func() {
+		s, err := openBlocking(lifetime, opts)
+		ch <- result{s, err}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.session, r.err
+	case <-start.Done():
+		go func() {
+			if r := <-ch; r.session != nil {
+				r.session.Close()
+			}
+		}()
+		return nil, fmt.Errorf("browser startup exceeded the caller's deadline: %w", start.Err())
+	}
+}
+
+// openBlocking does the launch and connect. It returns only when Chrome is up.
 //
 // When a persistent profile is configured it is created if missing and checked
-// for a competing Chrome first; Open fails with ErrProfileInUse rather than
+// for a competing Chrome first; it fails with ErrProfileInUse rather than
 // letting two instances corrupt each other's state.
-func Open(ctx context.Context, opts Options) (*Session, error) {
+func openBlocking(ctx context.Context, opts Options) (*Session, error) {
 	persistent := opts.ProfileDir != ""
 
 	if persistent {
@@ -185,7 +227,7 @@ func (s *Session) Close() {
 	if s.l != nil {
 		pid := s.l.PID()
 		s.l.Kill()
-		waitForExit(pid, exitWait)
+		exited := waitForExit(pid, exitWait)
 
 		// rod always sets a user-data-dir -- its own temp one when we supply no
 		// profile -- so ownership is tracked explicitly rather than inferred from
@@ -193,13 +235,17 @@ func (s *Session) Close() {
 		if !s.persistent {
 			go s.l.Cleanup()
 		}
-	}
 
-	// A Chrome that was killed rather than quit leaves its lock behind. With the
-	// process gone the lock is stale, and leaving it would block every later
-	// launch with a profile-in-use error.
-	if s.persistent && s.profileDir != "" && InUse(s.profileDir) {
-		_ = ClearStale(s.profileDir)
+		// A Chrome that was killed rather than quit leaves its lock behind, and
+		// leaving it would block every later launch with a profile-in-use error.
+		//
+		// Only a lock naming the process we just watched die is removed. A wedged
+		// Chrome that outlived the wait still owns the profile, and deleting its
+		// lock would invite a second browser onto the directory -- far worse than
+		// the profile-in-use error the leftover lock produces.
+		if exited && s.persistent && s.profileDir != "" {
+			clearLockOwnedBy(s.profileDir, pid)
+		}
 	}
 
 	if s.release != nil {
@@ -208,24 +254,48 @@ func (s *Session) Close() {
 	}
 }
 
-// waitForExit blocks until the process is gone or the budget runs out.
-func waitForExit(pid int, budget time.Duration) {
+// waitForExit blocks until the process is gone, reporting whether that was
+// confirmed rather than merely waited out.
+//
+// The distinction matters: callers use it to decide whether the profile is
+// genuinely free, and treating a timeout as success would hand the directory to
+// a second browser.
+func waitForExit(pid int, budget time.Duration) bool {
 	if pid <= 0 {
-		return
+		return true
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return
+		return true
 	}
 
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
 		// On Unix, signal 0 tests for existence without delivering anything.
 		if err := proc.Signal(syscall.Signal(0)); err != nil {
-			return // gone
+			return true // gone
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	return false
+}
+
+// clearLockOwnedBy removes a SingletonLock only if it names the given process.
+//
+// Chrome writes the lock as a symlink to "host-pid". Checking the pid keeps a
+// shutdown from deleting a lock that some other browser has since taken, which
+// would put two of them on one profile.
+func clearLockOwnedBy(profileDir string, pid int) {
+	target, err := os.Readlink(lockPath(profileDir))
+	if err != nil {
+		return // no lock, or not a symlink we understand
+	}
+	if i := strings.LastIndex(target, "-"); i >= 0 {
+		if owner, err := strconv.Atoi(target[i+1:]); err == nil && owner != pid {
+			return // belongs to someone else
+		}
+	}
+	_ = ClearStale(profileDir)
 }
 
 // Page is a browser tab with the navigation behavior X requires.

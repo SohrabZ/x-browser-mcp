@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -258,4 +260,77 @@ func TestCloseWaitsForChromeToExitAndFreesTheProfile(t *testing.T) {
 		t.Fatalf("a replacement could not take the profile after Close: %v", err)
 	}
 	replacement.Close()
+}
+
+// A stalled launch must not outrun the caller's deadline. The pooled browser
+// lives as long as the server, but the request that triggered the launch still
+// has a timeout, and the pool's opening claim keeps every other acquire waiting
+// behind it until this returns.
+func TestOpenWithinHonoursTheStartDeadline(t *testing.T) {
+	lifetime, cancelLifetime := context.WithCancel(context.Background())
+	defer cancelLifetime()
+
+	start, cancelStart := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelStart()
+
+	// A path that is not a browser: rod will fail or hang, and either way the
+	// start deadline is the thing that has to release us.
+	began := time.Now()
+	_, err := OpenWithin(lifetime, start, Options{
+		ChromePath: "/nonexistent/definitely-not-chrome",
+		Headless:   true,
+	})
+	elapsed := time.Since(began)
+
+	if err == nil {
+		t.Fatal("expected startup to fail")
+	}
+	if elapsed > 20*time.Second {
+		t.Fatalf("startup ran for %s; the caller's deadline did not release it", elapsed)
+	}
+}
+
+// A wedged Chrome still owns the profile. Deleting its lock because a wait
+// elapsed would invite a second browser onto the directory, which is worse than
+// the profile-in-use error the leftover lock produces.
+func TestLockOfALiveProcessIsNotCleared(t *testing.T) {
+	dir := t.TempDir()
+
+	// A lock naming this test process, which is very much alive.
+	if err := os.Symlink("host-"+strconv.Itoa(os.Getpid()), filepath.Join(dir, "SingletonLock")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	// Some other pid's shutdown must not touch it.
+	clearLockOwnedBy(dir, os.Getpid()+1)
+
+	if !InUse(dir) {
+		t.Fatal("a lock belonging to another process was deleted")
+	}
+
+	// Its own owner's shutdown may.
+	clearLockOwnedBy(dir, os.Getpid())
+	if InUse(dir) {
+		t.Fatal("the owning process should be able to clear its own stale lock")
+	}
+}
+
+func TestWaitForExitReportsWhetherItConfirmed(t *testing.T) {
+	// A process that will not exit within the budget.
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = cmd.Process.Kill() }()
+
+	if waitForExit(cmd.Process.Pid, 100*time.Millisecond) {
+		t.Error("a running process must not be reported as exited")
+	}
+
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
+
+	if !waitForExit(cmd.Process.Pid, 2*time.Second) {
+		t.Error("an exited process should be confirmed gone")
+	}
 }
