@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/launcher/flags"
+	"github.com/go-rod/rod/lib/proto"
 )
 
 func flagsOf(t *testing.T, opts Options) string {
@@ -534,4 +537,70 @@ func TestCleanupLeavesAnUnattributableLockAlone(t *testing.T) {
 			t.Fatal("our own leftover lock should be cleared")
 		}
 	})
+}
+
+// A page with unsaved work raises "Leave site?" when it is closed, and then
+// waits for an answer. During teardown nobody is there to give one: X registers
+// such a hook on its composer, so a write that had just posted left the browser
+// parked behind a modal, still holding the profile.
+func TestClosingATabDoesNotWaitOnABeforeUnloadPrompt(t *testing.T) {
+	// Headless Chrome dismisses these dialogs by itself, so a headless run would
+	// pass whether or not the bug is present. Writes use a visible browser, which
+	// is where the modal actually appeared, so this needs one -- and a visible
+	// browser needs a display, which CI does not have.
+	if os.Getenv("XBM_HEADED_TESTS") == "" {
+		t.Skip("set XBM_HEADED_TESTS=1 to run; needs a visible browser")
+	}
+	chrome := ChromePathForTest()
+	if chrome == "" {
+		t.Skip("no Chrome installed")
+	}
+
+	// A page that insists it has unsaved changes, the way a composer does.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><body>composing<script>
+			window.addEventListener('beforeunload', function (e) {
+				e.preventDefault();
+				e.returnValue = 'unsaved';
+				return 'unsaved';
+			});
+		</script></body></html>`))
+	}))
+	defer srv.Close()
+
+	session, err := Open(context.Background(), Options{ChromePath: chrome, Headless: false})
+	if err != nil {
+		t.Skipf("cannot start chrome: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	page, err := session.Page(context.Background())
+	if err != nil {
+		t.Fatalf("page: %v", err)
+	}
+	if err := page.Goto(srv.URL); err != nil {
+		t.Fatalf("goto: %v", err)
+	}
+	// Chrome ignores beforeunload until the user has actually interacted with
+	// the page. A write types into the composer and clicks Post, which arms it;
+	// without a gesture here the prompt would never fire and this test would
+	// pass whether or not the bug is present.
+	body, err := page.Rod().Element("body")
+	if err != nil {
+		t.Fatalf("body: %v", err)
+	}
+	if err := body.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		t.Fatalf("click: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	closed := make(chan struct{})
+	go func() { page.Close(); close(closed) }()
+
+	select {
+	case <-closed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("closing the tab blocked, which is what a beforeunload prompt does")
+	}
 }

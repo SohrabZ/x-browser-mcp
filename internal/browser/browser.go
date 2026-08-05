@@ -384,12 +384,34 @@ func (p *Page) Has(selector string, wait time.Duration) bool {
 
 // Close closes the tab, using the browser's context so it still works after the
 // caller's deadline has passed.
+//
+// The tab is closed at the target level rather than through the page, because
+// the page-level close runs the document's beforeunload hooks. X registers one
+// on its composer: a write that has just posted still counts as unsaved work,
+// so closing the tab raises a "Leave site?" dialog and then waits for someone
+// to answer it. Nobody is there to -- the browser is being torn down -- so the
+// write browser sits behind a modal, holding the profile until the shutdown
+// wait gives up on it.
+//
+// Discarding the tab outright is the right behaviour here regardless. Anything
+// the page still wants to save is a side effect of automation we have already
+// finished with.
 func (p *Page) Close() {
 	target := p.closer
 	if target == nil {
 		target = p.page
 	}
-	_ = target.Close()
+	if _, err := (proto.TargetCloseTarget{TargetID: target.TargetID}).Call(target.Browser()); err != nil {
+		// Fall back to the page-level close, which may prompt but is better
+		// than leaving the tab open.
+		_ = target.Close()
+		return
+	}
+	// rod caches a page against its target and drops it in its own Close, which
+	// this path goes around. A pooled browser opens a tab per read and lives as
+	// long as the process, so leaving the entry behind grows that cache for
+	// every read the process ever serves.
+	target.Browser().RemoveState(target.TargetID)
 }
 
 func isTargetLost(err error) bool {

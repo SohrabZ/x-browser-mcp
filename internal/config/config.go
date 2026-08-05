@@ -38,6 +38,14 @@ type Config struct {
 	FetchTimeout time.Duration
 	LoginTimeout time.Duration
 
+	// WriteTimeout bounds one mutating action. It is separate from FetchTimeout
+	// because a write is not a fetch: it starts a browser of its own, presses a
+	// control, waits for X's request to finish, and then reloads the post to
+	// confirm the action survived. Sharing the read budget meant the confirmation
+	// could be cut off by the deadline and reported as a timeout rather than as
+	// what it found.
+	WriteTimeout time.Duration
+
 	// BrowserIdle is how long a browser stays warm with no reads before it is
 	// closed. Zero disables warming, opening a browser per read.
 	BrowserIdle time.Duration
@@ -97,6 +105,7 @@ func Default() Config {
 
 		FetchTimeout: 45 * time.Second,
 		LoginTimeout: 5 * time.Minute,
+		WriteTimeout: 2 * time.Minute,
 
 		// Long enough that a conversation's reads share one browser, short
 		// enough that an idle machine is not holding Chrome all day.
@@ -156,6 +165,9 @@ func (c Config) Validate() error {
 	}
 	if c.LoginTimeout <= 0 {
 		return fmt.Errorf("login timeout must be positive, got %s", c.LoginTimeout)
+	}
+	if c.WriteTimeout <= 0 {
+		return fmt.Errorf("write timeout must be positive, got %s", c.WriteTimeout)
 	}
 	if err := c.ReadPace.validate("read"); err != nil {
 		return err

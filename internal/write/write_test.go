@@ -2,9 +2,12 @@ package write
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +15,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/SohrabZ/x-browser-mcp/internal/browser"
+	"github.com/SohrabZ/x-browser-mcp/internal/xui"
 )
 
 // A disabled gate must refuse everything, whatever token is offered. This is
@@ -275,3 +281,241 @@ func TestAConfirmedWriteShutdownReleasesImmediately(t *testing.T) {
 type recordingReservation struct{ released atomic.Bool }
 
 func (r *recordingReservation) Release() { r.released.Store(true) }
+
+// A permalink is not one post. X renders the post's ancestors above it and its
+// replies below, each with a reply, repost, like and bookmark row of its own, so
+// a check matched against the document answers for whichever of them the page
+// happens to reach first. One reply the viewer had already liked was enough to
+// make a like report success without ever touching the post that was asked for.
+func TestAnActionReadsOnlyThePostItWasAskedFor(t *testing.T) {
+	p, done := postPage(t, `
+		<article data-testid="tweet" id="ancestor">
+			<a href="/someone/status/111">1h</a>
+			<div data-testid="unlike" onclick="press('ancestor')">liked already</div>
+			<div data-testid="removeBookmark">bookmarked already</div>
+		</article>
+		<article data-testid="tweet" id="wanted">
+			<a href="/someone/status/222">2h</a>
+			<div data-testid="like" onclick="press('wanted')">like</div>
+			<div data-testid="bookmark">bookmark</div>
+		</article>
+		<article data-testid="tweet" id="reply">
+			<a href="/other/status/333">3h</a>
+			<div data-testid="unlike" onclick="press('reply')">liked already</div>
+		</article>`)
+	defer done()
+
+	// The document holds an unlike and a removeBookmark, both on other posts.
+	// Neither says anything about the post that was asked for.
+	if hasOnPost(p, "222", xui.SelUnlikeButton, 200*time.Millisecond) {
+		t.Error("read another post's like as this one's; a like would report success having done nothing")
+	}
+	if hasOnPost(p, "222", xui.SelBookmarkRemove, 200*time.Millisecond) {
+		t.Error("read another post's bookmark as this one's")
+	}
+
+	// And the one it does hold is found.
+	if !hasOnPost(p, "222", xui.SelLikeButton, time.Second) {
+		t.Error("did not find the like control on the post that has one")
+	}
+
+	if err := pressOnPost(p, "222", xui.SelLikeButton, time.Second); err != nil {
+		t.Fatalf("press: %v", err)
+	}
+	if got := pressed(t, p); got != "wanted" {
+		t.Errorf("pressed %q, want the post that was asked for", got)
+	}
+}
+
+// The control has to be on the post itself. Pressing whatever the document
+// offers first is how the wrong post gets liked.
+func TestPressingAControlThePostDoesNotOfferFails(t *testing.T) {
+	p, done := postPage(t, `
+		<article data-testid="tweet" id="wanted">
+			<a href="/someone/status/222">2h</a>
+			<div data-testid="unlike" onclick="press('wanted')">liked already</div>
+		</article>
+		<article data-testid="tweet" id="reply">
+			<a href="/other/status/333">3h</a>
+			<div data-testid="like" onclick="press('reply')">like</div>
+		</article>`)
+	defer done()
+
+	err := pressOnPost(p, "222", xui.SelLikeButton, 300*time.Millisecond)
+	if err == nil {
+		t.Fatal("pressed a control the post does not have")
+	}
+	if got := pressed(t, p); got != "" {
+		t.Errorf("pressed %q; nothing should have been pressed", got)
+	}
+}
+
+// X leaves the status link off the post you are already looking at, so when no
+// article claims the id the first one is used -- the post itself on a top-level
+// permalink, and what an unscoped selector would have found anyway.
+func TestAPostThatClaimsNoIDFallsBackToTheFirstOne(t *testing.T) {
+	p, done := postPage(t, `
+		<article data-testid="tweet" id="wanted">
+			<div data-testid="like" onclick="press('wanted')">like</div>
+		</article>
+		<article data-testid="tweet" id="reply">
+			<a href="/other/status/333">3h</a>
+			<div data-testid="like" onclick="press('reply')">like</div>
+		</article>`)
+	defer done()
+
+	if err := pressOnPost(p, "222", xui.SelLikeButton, time.Second); err != nil {
+		t.Fatalf("press: %v", err)
+	}
+	if got := pressed(t, p); got != "wanted" {
+		t.Errorf("pressed %q, want the first post on the page", got)
+	}
+}
+
+// An empty page is reported as such rather than as a post without the control,
+// so the wait can tell "X has not rendered yet" from "this post cannot do that".
+func TestNoPostAtAllIsNotAMissingControl(t *testing.T) {
+	p, done := postPage(t, `<div>no posts here</div>`)
+	defer done()
+
+	state, err := onPost(p, "222", xui.SelLikeButton, false)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if state != noPost {
+		t.Errorf("state %q, want %q", state, noPost)
+	}
+}
+
+// postPage serves the given articles and drives a real browser at them, which is
+// the only way to exercise a selector: the scoping lives in the page.
+func postPage(t *testing.T, body string) (*browser.Page, func()) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("needs a browser")
+	}
+	chrome := browser.ChromePathForTest()
+	if chrome == "" {
+		t.Skip("no Chrome installed")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprintf(w, `<html><body>
+			<script>window.pressedID = ''; function press(id) { window.pressedID = id; }</script>
+			%s
+		</body></html>`, body)
+	}))
+
+	session, err := browser.Open(context.Background(), browser.Options{ChromePath: chrome, Headless: true})
+	if err != nil {
+		srv.Close()
+		t.Skipf("cannot start chrome: %v", err)
+	}
+
+	page, err := session.Page(context.Background())
+	if err != nil {
+		_ = session.Close()
+		srv.Close()
+		t.Fatalf("page: %v", err)
+	}
+	if err := page.Goto(srv.URL); err != nil {
+		page.Close()
+		_ = session.Close()
+		srv.Close()
+		t.Fatalf("goto: %v", err)
+	}
+
+	return page, func() {
+		page.Close()
+		_ = session.Close()
+		srv.Close()
+	}
+}
+
+// pressed reports which post recorded a press, or "" if none did.
+func pressed(t *testing.T, p *browser.Page) string {
+	t.Helper()
+	res, err := p.Rod().Eval(`() => window.pressedID`)
+	if err != nil {
+		t.Fatalf("read press: %v", err)
+	}
+	return res.Value.String()
+}
+
+// X nests a quoted post's article inside the quoting one. A subtree search
+// therefore reaches a control that belongs to the quoted post -- so liking a
+// post that quotes another could have liked the one it quotes.
+func TestAQuotedPostsControlsAreNotThePostsOwn(t *testing.T) {
+	p, done := postPage(t, `
+		<article data-testid="tweet" id="wanted">
+			<a href="/someone/status/222">2h</a>
+			<div data-testid="like" onclick="press('wanted')">like</div>
+			<article data-testid="tweet" id="quoted">
+				<a href="/other/status/999">1d</a>
+				<div data-testid="unlike" onclick="press('quoted')">liked already</div>
+			</article>
+		</article>`)
+	defer done()
+
+	// The quoted post is liked; the post itself is not.
+	if hasOnPost(p, "222", xui.SelUnlikeButton, 200*time.Millisecond) {
+		t.Error("read the quoted post's like as the quoting post's")
+	}
+	if err := pressOnPost(p, "222", xui.SelLikeButton, time.Second); err != nil {
+		t.Fatalf("press: %v", err)
+	}
+	if got := pressed(t, p); got != "wanted" {
+		t.Errorf("pressed %q, want the quoting post", got)
+	}
+}
+
+// And a quoted post's status link does not let it answer for the post either;
+// otherwise a reply quoting the post being acted on could claim its id.
+func TestAQuotedStatusLinkDoesNotClaimThePost(t *testing.T) {
+	p, done := postPage(t, `
+		<article data-testid="tweet" id="wanted">
+			<a href="/someone/status/222">2h</a>
+			<div data-testid="like" onclick="press('wanted')">like</div>
+		</article>
+		<article data-testid="tweet" id="reply">
+			<a href="/other/status/333">3h</a>
+			<div data-testid="like" onclick="press('reply')">like</div>
+			<article data-testid="tweet" id="requoted">
+				<a href="/someone/status/222">2h</a>
+			</article>
+		</article>`)
+	defer done()
+
+	if err := pressOnPost(p, "222", xui.SelLikeButton, time.Second); err != nil {
+		t.Fatalf("press: %v", err)
+	}
+	if got := pressed(t, p); got != "wanted" {
+		t.Errorf("pressed %q; a reply quoting the post must not answer for it", got)
+	}
+}
+
+// An id of any other shape can never match the digits in a status link, so it
+// would have fallen through to the first post on the page rather than failing.
+// It is refused before a browser is ever opened.
+func TestAnIDThatIsNotAPostIDIsRefused(t *testing.T) {
+	for _, id := range []string{"", "  ", "abc", "222?s=20", "222/photo/1", "-1", "1e9", "22 2"} {
+		if _, err := postTarget("someone", id); err == nil {
+			t.Errorf("post id %q was accepted", id)
+		}
+	}
+	target, err := postTarget("@Someone", "1234567890123456789")
+	if err != nil {
+		t.Fatalf("a real post id was refused: %v", err)
+	}
+	if want := "https://x.com/Someone/status/1234567890123456789"; target != want {
+		t.Errorf("target %q, want %q", target, want)
+	}
+}
+
+// A handle is still required, and says so on its own rather than blaming the id.
+func TestAMissingHandleIsRefused(t *testing.T) {
+	if _, err := postTarget("  ", "222"); err == nil {
+		t.Error("an empty handle was accepted")
+	}
+}

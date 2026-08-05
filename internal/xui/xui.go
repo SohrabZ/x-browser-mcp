@@ -96,15 +96,87 @@ const (
 	SelAccountMenu = `[data-testid="SideNav_AccountSwitcher_Button"]`
 	SelProfileLink = `[data-testid="AppTabBar_Profile_Link"]`
 
-	SelComposeBox    = `[data-testid="tweetTextarea_0"]`
-	SelComposeButton = `[data-testid="tweetButtonInline"], [data-testid="tweetButton"]`
-	SelReplyButton   = `[data-testid="reply"]`
-	SelLikeButton    = `[data-testid="like"]`
-	SelUnlikeButton  = `[data-testid="unlike"]`
-	SelRepostButton  = `[data-testid="retweet"]`
-	SelRepostConfirm = `[data-testid="retweetConfirm"]`
-	SelBookmarkAdd   = `[data-testid="bookmark"]`
+	SelComposeBox     = `[data-testid="tweetTextarea_0"]`
+	SelComposeButton  = `[data-testid="tweetButtonInline"], [data-testid="tweetButton"]`
+	SelReplyButton    = `[data-testid="reply"]`
+	SelLikeButton     = `[data-testid="like"]`
+	SelUnlikeButton   = `[data-testid="unlike"]`
+	SelRepostButton   = `[data-testid="retweet"]`
+	SelRepostConfirm  = `[data-testid="retweetConfirm"]`
+	SelUnrepostButton = `[data-testid="unretweet"]`
+	SelBookmarkAdd    = `[data-testid="bookmark"]`
+	SelBookmarkRemove = `[data-testid="removeBookmark"]`
+
+	// SelPost is the article X wraps around a single post, and the unit the
+	// engagement controls above belong to. See ControlScript.
+	SelPost = `article[data-testid="tweet"]`
 )
+
+// ControlScript finds one post's engagement control and, when asked to, presses
+// it. It takes a post id, a selector and a flag, and returns "ok", "no-control"
+// if the post is there without the control, or "no-post" if X has not rendered
+// any post yet.
+//
+// A permalink page is not one post. X renders the post's ancestors above it, its
+// replies below, and any quoted post inside it, and gives every one of them its
+// own reply, repost, like and bookmark row. A selector matched against the
+// document therefore finds whichever of those comes first, so one reply the
+// viewer had already liked was enough for a like to report success without ever
+// touching the post that was asked for.
+//
+// The post wanted is the article that links to its own status id. X leaves that
+// link off the post you are already looking at, so an article claiming the id is
+// preferred and the first article is the fallback -- which is the post itself on
+// a top-level permalink, and is what an unscoped selector would have found.
+//
+// The press is a DOM click rather than a synthesized mouse event, because X
+// ignores those on these controls: the page accepts the event, reports nothing
+// wrong, and makes no request.
+//
+// Only what a post renders itself counts, for both halves of that. X nests a
+// quoted post's article inside the quoting one, so a plain subtree search
+// reaches links and controls belonging to a different post -- which would let a
+// quoted post's status link decide the match, and let its like button be the one
+// pressed.
+const ControlScript = `(postID, selector, press) => {
+  const posts = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+  if (posts.length === 0) return 'no-post';
+
+  const own = (post, sel) =>
+    Array.from(post.querySelectorAll(sel)).filter(el => el.closest('article') === post);
+
+  const owns = post => own(post, 'a[href*="/status/"]').some(link => {
+    const m = /\/status\/(\d+)/.exec(link.getAttribute('href') || '');
+    return m !== null && m[1] === postID;
+  });
+
+  const controls = own(posts.find(owns) || posts[0], selector);
+  if (controls.length === 0) return 'no-control';
+  if (press) controls[0].click();
+  return 'ok';
+}`
+
+// ValidPostID reports whether id has the shape X gives a post: digits, and
+// nothing else.
+//
+// Everything downstream leans on that. It goes into a URL unescaped, and
+// ControlScript matches it against the digits in a status link -- which anything
+// else can never match, so an id of the wrong shape would quietly fall back to
+// the first post on the page rather than fail.
+func ValidPostID(id string) bool {
+	if id == "" || len(id) > maxPostIDDigits {
+		return false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// maxPostIDDigits is well clear of the 19 digits a 64-bit snowflake id needs.
+const maxPostIDDigits = 25
 
 // SignedInCookies reports whether the browser holds the pair of cookies X sets
 // for an authenticated session.
