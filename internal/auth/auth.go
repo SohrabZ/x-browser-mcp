@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"sync"
 	"time"
@@ -131,11 +132,15 @@ func (m *Manager) Require(ctx context.Context) error {
 //
 // The login browser holds the profile lock, so probing during it would either
 // fail on the lock or race the user mid-sign-in.
+//
+// This tracks the window, not the deadline. A login that overran its timeout is
+// still a login: the window is open and still owns the profile, and reporting
+// otherwise would send reads at a directory Chrome is holding.
 func (m *Manager) loginInProgress() (Status, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.login == nil || !m.now().Before(m.login.deadline) {
+	if m.login == nil {
 		return Status{}, false
 	}
 	return Status{
@@ -198,7 +203,7 @@ func (m *Manager) probe(ctx context.Context) (Status, error) {
 	}
 	defer release()
 
-	page, err := session.Page()
+	page, err := session.Page(ctx)
 	if err != nil {
 		return Status{}, err
 	}
@@ -247,7 +252,8 @@ func (m *Manager) StartLogin(ctx context.Context) (time.Time, error) {
 	m.Invalidate()
 
 	m.mu.Lock()
-	if m.login != nil && m.now().Before(m.login.deadline) {
+	if m.login != nil {
+		// A window is already open on this profile; a second one cannot have it.
 		deadline := m.login.deadline
 		m.mu.Unlock()
 		return deadline, nil
@@ -303,6 +309,17 @@ func (m *Manager) watch(att *attempt) {
 	select {
 	case <-att.done:
 	case <-timer.C:
+		// The deadline passed, but that says nothing about whether the user
+		// closed the window. Chrome still owns the profile, so the reservation
+		// is kept and the wait continues.
+		//
+		// Killing the window here would be worse than waiting: it would discard
+		// a sign-in the user may be part way through. Releasing the profile
+		// instead would hand the directory to a read while Chrome still holds
+		// it, which is the single-owner invariant this exists to protect.
+		slog.Warn("x login is taking longer than the timeout; still waiting for the window to close",
+			"deadline", att.deadline)
+		<-att.done
 	}
 
 	m.mu.Lock()
@@ -312,7 +329,7 @@ func (m *Manager) watch(att *attempt) {
 	m.cached = nil
 	m.mu.Unlock()
 
-	// The window is gone, so reads may have the profile back.
+	// The window has actually exited, so reads may have the profile back.
 	if att.profile != nil {
 		att.profile.Release()
 	}

@@ -212,7 +212,7 @@ func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func
 	}
 	defer session.Close()
 
-	page, err := session.Page()
+	page, err := session.Page(ctx)
 	if err != nil {
 		return w.fail(rec, err)
 	}

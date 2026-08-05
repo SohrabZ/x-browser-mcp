@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -52,16 +53,75 @@ func TestStatusShortCircuitsWhileLoginIsOpen(t *testing.T) {
 	}
 }
 
-func TestExpiredLoginNoLongerShortCircuits(t *testing.T) {
+// A login that overran its timeout is still a login. The window is open and
+// still owns the profile, so reporting otherwise would send reads at a
+// directory Chrome is holding, and they would fail on the profile lock.
+func TestOverrunningLoginStillOwnsTheProfile(t *testing.T) {
 	clock := newClock()
 	m := New(Options{ProfileDir: "/tmp/profile"})
 	m.now = clock.now
 	m.login = &attempt{deadline: clock.now().Add(time.Minute)}
 
-	clock.advance(2 * time.Minute)
+	clock.advance(10 * time.Minute) // well past the deadline
 
-	if _, ok := m.loginInProgress(); ok {
-		t.Fatal("an expired login attempt must stop short-circuiting")
+	status, ok := m.loginInProgress()
+	if !ok {
+		t.Fatal("an open login window must keep short-circuiting past its deadline")
+	}
+	if status.State != StateInProgress {
+		t.Fatalf("got state %q, want %q", status.State, StateInProgress)
+	}
+}
+
+// fakeReservation records whether the profile was handed back.
+type fakeReservation struct{ released atomic.Bool }
+
+func (f *fakeReservation) Release() { f.released.Store(true) }
+
+// The deadline says nothing about whether Chrome exited. Releasing on the timer
+// would give the profile to a read while the login window still held it.
+func TestWatchKeepsTheProfileUntilTheWindowExits(t *testing.T) {
+	m := New(Options{LoginTimeout: time.Millisecond})
+
+	done := make(chan error, 1)
+	res := &fakeReservation{}
+	att := &attempt{
+		done:     done,
+		deadline: time.Now().Add(5 * time.Millisecond), // fires almost immediately
+		profile:  res,
+	}
+	m.login = att
+
+	go m.watch(att)
+
+	// Well past the deadline, with the process still running.
+	time.Sleep(120 * time.Millisecond)
+	if res.released.Load() {
+		t.Fatal("the profile was released while the login window was still open")
+	}
+	m.mu.Lock()
+	stillOwned := m.login == att
+	m.mu.Unlock()
+	if !stillOwned {
+		t.Fatal("the login marker was cleared while the window was still open")
+	}
+
+	// The window closes.
+	done <- nil
+
+	deadline := time.After(2 * time.Second)
+	for !res.released.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("the profile was never released after the window exited")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	m.mu.Lock()
+	cleared := m.login == nil
+	m.mu.Unlock()
+	if !cleared {
+		t.Error("the login marker should be cleared once the window exits")
 	}
 }
 

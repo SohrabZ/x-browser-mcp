@@ -121,13 +121,22 @@ func (s *Session) OnClose(fn func()) {
 	s.release = fn
 }
 
-// Page opens a blank page ready to navigate.
-func (s *Session) Page() (*Page, error) {
+// Page opens a blank page whose operations are bound to ctx.
+//
+// A shared browser lives for the life of the server, and pages inherit their
+// browser's context, so without rebinding here a caller's deadline would never
+// reach Goto, WaitLoad or Eval -- a stalled navigation would hold its lease
+// indefinitely and block anything waiting to reserve the profile.
+//
+// Closing deliberately uses the browser's context rather than ctx: cleanup has
+// to succeed after the caller has given up, or abandoned tabs accumulate in a
+// browser that is never restarted.
+func (s *Session) Page(ctx context.Context) (*Page, error) {
 	p, err := s.browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
 		return nil, fmt.Errorf("open page: %w", err)
 	}
-	return &Page{page: p}, nil
+	return &Page{page: p.Context(ctx), closer: p}, nil
 }
 
 // Alive reports whether the browser is still reachable.
@@ -173,7 +182,11 @@ func (s *Session) Close() {
 
 // Page is a browser tab with the navigation behavior X requires.
 type Page struct {
+	// page carries the caller's context, so their deadline interrupts work.
 	page *rod.Page
+	// closer carries the browser's context, so cleanup still runs once the
+	// caller's context is done.
+	closer *rod.Page
 }
 
 // Rod exposes the underlying page for callers that need raw access, such as
@@ -210,9 +223,14 @@ func (p *Page) Has(selector string, wait time.Duration) bool {
 	return err == nil && el != nil
 }
 
-// Close closes the tab.
+// Close closes the tab, using the browser's context so it still works after the
+// caller's deadline has passed.
 func (p *Page) Close() {
-	_ = p.page.Close()
+	target := p.closer
+	if target == nil {
+		target = p.page
+	}
+	_ = target.Close()
 }
 
 func isTargetLost(err error) bool {
@@ -246,4 +264,19 @@ func ClearStale(profileDir string) error {
 
 func lockPath(profileDir string) string {
 	return filepath.Join(profileDir, "SingletonLock")
+}
+
+// ChromePathForTest exposes Chrome discovery to tests in this package's suite
+// that need a real browser and should skip when none is installed.
+func ChromePathForTest() string {
+	for _, c := range []string{
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		"/usr/bin/google-chrome",
+		"/usr/bin/chromium",
+	} {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
+			return c
+		}
+	}
+	return ""
 }

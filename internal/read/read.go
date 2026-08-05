@@ -238,7 +238,7 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 	}
 	defer release()
 
-	page, err := session.Page()
+	page, err := session.Page(ctx)
 	if err != nil {
 		return nil, err
 	}

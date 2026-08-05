@@ -1,11 +1,14 @@
 package browser
 
 import (
+	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-rod/rod/lib/launcher/flags"
 )
@@ -140,5 +143,69 @@ func TestIsTargetLostMatchesOnlyTheTransientError(t *testing.T) {
 	}
 	if isTargetLost(nil) {
 		t.Error("nil is not an error")
+	}
+}
+
+// A leased page must honour the caller's deadline.
+//
+// The shared browser outlives any request, and pages inherit their browser's
+// context, so without rebinding a stalled navigation would ignore the read's
+// timeout entirely -- holding its lease and blocking anything waiting to
+// reserve the profile. This drives a real browser against a server that never
+// responds, which is the shape of that failure.
+func TestLeasedPageHonoursCallerDeadline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs a browser")
+	}
+	chrome := ChromePathForTest()
+	if chrome == "" {
+		t.Skip("no Chrome installed")
+	}
+
+	// A listener that accepts and then never replies: any navigation to it hangs.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c // hold it open, send nothing
+		}
+	}()
+
+	// The browser is on a long-lived context, as the pool keeps it.
+	browserCtx, cancelBrowser := context.WithCancel(context.Background())
+	defer cancelBrowser()
+
+	sess, err := Open(browserCtx, Options{ChromePath: chrome, Headless: true})
+	if err != nil {
+		t.Skipf("cannot start chrome: %v", err)
+	}
+	defer sess.Close()
+
+	// The caller's deadline is short.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	page, err := sess.Page(ctx)
+	if err != nil {
+		t.Fatalf("page: %v", err)
+	}
+	defer page.Close()
+
+	start := time.Now()
+	err = page.Goto("http://" + ln.Addr().String())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected the hung navigation to fail once the deadline passed")
+	}
+	if elapsed > 15*time.Second {
+		t.Fatalf("navigation ran for %s; the caller's deadline did not interrupt it", elapsed)
 	}
 }
