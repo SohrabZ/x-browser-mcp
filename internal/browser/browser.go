@@ -139,6 +139,16 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 	return &Session{browser: b, l: l, persistent: persistent, profileDir: opts.ProfileDir}, nil
 }
 
+// ProfileDir reports the persistent profile this session runs against, or ""
+// for a throwaway one. Callers use it to confirm the profile is free after a
+// shutdown they could not otherwise verify.
+func (s *Session) ProfileDir() string {
+	if s == nil {
+		return ""
+	}
+	return s.profileDir
+}
+
 // OnClose registers a callback run once when the session closes.
 func (s *Session) OnClose(fn func()) {
 	s.release = fn
@@ -201,9 +211,35 @@ func reap(l *launcher.Launcher, opts Options, persistent bool) {
 		go l.Cleanup()
 		return
 	}
-	if exited && opts.ProfileDir != "" {
-		clearLockOwnedBy(opts.ProfileDir, pid)
+	if opts.ProfileDir == "" {
+		return
 	}
+	if exited {
+		clearLockOwnedBy(opts.ProfileDir, pid)
+		return
+	}
+	// The startup failed but Chrome outlived the kill, so it still owns the
+	// directory. Record that in the lock rather than returning a plain launch
+	// error and letting the next caller find an unclaimed profile: Chrome
+	// writes its lock early, but "early" is not "before we gave up on it".
+	claimLock(opts.ProfileDir, pid)
+}
+
+// claimLock makes the profile lock name pid when nothing else has claimed it,
+// so InUse reports the profile held for as long as that process lives -- and
+// stale, not held, once it dies.
+func claimLock(profileDir string, pid int) {
+	if pid <= 0 {
+		return
+	}
+	if _, known := lockOwner(profileDir); known {
+		return // someone already owns it; do not overwrite the record
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		host = "localhost"
+	}
+	_ = os.Symlink(fmt.Sprintf("%s-%d", host, pid), lockPath(profileDir))
 }
 
 // exitWait bounds how long Close waits for Chrome to actually go away. Chrome
@@ -249,6 +285,9 @@ func (s *Session) Close() error {
 				clearLockOwnedBy(s.profileDir, pid)
 			}
 		} else {
+			if s.persistent && s.profileDir != "" {
+				claimLock(s.profileDir, pid)
+			}
 			unconfirmed = fmt.Errorf("chrome (pid %d) did not exit within %s; it may still hold the profile", pid, exitWait)
 		}
 	}
@@ -270,15 +309,9 @@ func waitForExit(pid int, budget time.Duration) bool {
 	if pid <= 0 {
 		return true
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return true
-	}
-
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
-		// On Unix, signal 0 tests for existence without delivering anything.
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
+		if !alive(pid) {
 			return true // gone
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -292,14 +325,12 @@ func waitForExit(pid int, budget time.Duration) bool {
 // shutdown from deleting a lock that some other browser has since taken, which
 // would put two of them on one profile.
 func clearLockOwnedBy(profileDir string, pid int) {
-	target, err := os.Readlink(lockPath(profileDir))
-	if err != nil {
-		return // no lock, or not a symlink we understand
+	owner, known := lockOwner(profileDir)
+	if !known {
+		return // no lock
 	}
-	if i := strings.LastIndex(target, "-"); i >= 0 {
-		if owner, err := strconv.Atoi(target[i+1:]); err == nil && owner != pid {
-			return // belongs to someone else
-		}
+	if owner > 0 && owner != pid {
+		return // belongs to someone else
 	}
 	_ = ClearStale(profileDir)
 }
@@ -368,11 +399,86 @@ func isTargetLost(err error) bool {
 
 // InUse reports whether a Chrome instance currently holds the profile.
 //
-// Chrome creates SingletonLock on startup and removes it on a clean quit. It is
-// left behind when Chrome is killed, which is why ClearStale exists.
+// This is the single authority on that question. Everything else in the
+// project -- a pool retiring a session, a write handing the profile back, a
+// login window taking it -- used to answer it from its own bookkeeping, and
+// bookkeeping is a cache: every place it was kept was a place it could be
+// dropped, and dropping it puts two browsers on one directory.
+//
+// The directory itself cannot be out of date. Chrome writes SingletonLock as a
+// symlink to "host-pid" on startup and removes it on a clean quit; a killed
+// Chrome leaves it behind. So the lock existing is not ownership -- ownership
+// is the process it names still being alive. A lock naming a dead process is
+// stale and the profile is free.
+//
+// An unreadable or unparseable lock is treated as in use. Refusing to start is
+// recoverable; two Chromes on one profile is not.
 func InUse(profileDir string) bool {
-	_, err := os.Lstat(lockPath(profileDir))
-	return err == nil
+	pid, known := lockOwner(profileDir)
+	switch {
+	case !known:
+		return false // no lock at all
+	case pid <= 0:
+		return true // a lock we cannot read: assume someone holds it
+	default:
+		return alive(pid)
+	}
+}
+
+// lockOwner reports the process named by the profile lock. known is false when
+// there is no lock; pid is zero when there is one but it cannot be parsed.
+func lockOwner(profileDir string) (pid int, known bool) {
+	target, err := os.Readlink(lockPath(profileDir))
+	if err != nil {
+		if _, statErr := os.Lstat(lockPath(profileDir)); statErr == nil {
+			return 0, true // present, but not a symlink we understand
+		}
+		return 0, false
+	}
+	i := strings.LastIndex(target, "-")
+	if i < 0 {
+		return 0, true
+	}
+	owner, err := strconv.Atoi(target[i+1:])
+	if err != nil || owner <= 0 {
+		return 0, true
+	}
+	return owner, true
+}
+
+func alive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// On Unix, signal 0 tests for existence without delivering anything.
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// WaitUntilFree blocks until no Chrome holds the profile.
+//
+// Callers that have just shut a browser down use this to confirm the handoff
+// instead of trusting that Close did what it was asked. It returns an error if
+// the profile is still held when the budget runs out, so an unconfirmed
+// shutdown stays unconfirmed rather than quietly becoming a success.
+func WaitUntilFree(ctx context.Context, profileDir string, budget time.Duration) error {
+	if profileDir == "" {
+		return nil
+	}
+	deadline := time.Now().Add(budget)
+	for {
+		if !InUse(profileDir) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w (%s) after %s", ErrProfileInUse, lockPath(profileDir), budget)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // ClearStale removes a leftover profile lock. Callers must confirm no Chrome is

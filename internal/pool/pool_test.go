@@ -954,3 +954,40 @@ func (c *countingCloseSession) Close() error {
 	time.Sleep(20 * time.Millisecond) // shutdown takes a moment
 	return c.fakeSession.Close()
 }
+
+// A reservation that fails because the browser would not confirm its exit must
+// leave that fact behind. Exclusivity is a promise that nothing else holds the
+// profile, and the next caller has no way to re-derive a shutdown it did not
+// witness -- so if the failure is forgotten, the promise gets made anyway.
+func TestAFailedShutdownBlocksTheNextReservationToo(t *testing.T) {
+	wedged := errors.New("chrome did not exit; it may still hold the profile")
+	p := New(func(context.Context) (Session, error) {
+		return &stubborn{err: wedged}, nil
+	}, time.Minute)
+	defer p.Close()
+
+	// Warm a session, then reserve: the shutdown cannot be confirmed.
+	lease, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	lease.Release()
+
+	if _, err := p.Reserve(t.Context()); !errors.Is(err, wedged) {
+		t.Fatalf("first reserve: got %v, want the unconfirmed shutdown", err)
+	}
+
+	// Nothing has proven the profile free since. The second caller must not be
+	// told it has exclusive use of a directory some surviving Chrome owns.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if _, err := p.Reserve(ctx); !errors.Is(err, wedged) {
+		t.Fatalf("second reserve: got %v, want the same unconfirmed shutdown", err)
+	}
+}
+
+// stubborn is a session whose shutdown never confirms.
+type stubborn struct{ err error }
+
+func (s *stubborn) Close() error               { return s.err }
+func (s *stubborn) Alive(context.Context) bool { return true }

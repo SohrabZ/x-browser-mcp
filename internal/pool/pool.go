@@ -431,7 +431,14 @@ func (p *Pool) Reserve(ctx context.Context) (Reservation, error) {
 
 	if session != nil {
 		if err := session.Close(); err != nil {
+			// Record it on the pool, not just here. A reservation that fails
+			// releases exclusivity, and the next caller must find the same
+			// unconfirmed shutdown waiting rather than a clean slate -- the
+			// browser it could not account for is still out there.
 			unreleased = err
+			p.mu.Lock()
+			p.unreleased = err
+			p.mu.Unlock()
 		}
 	}
 

@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -80,8 +81,9 @@ func TestInUseFollowsTheSingletonLock(t *testing.T) {
 		t.Fatal("a fresh profile must not report as in use")
 	}
 
-	// Chrome writes this as a symlink to host-pid; its target is irrelevant to us.
-	if err := os.Symlink("host-1234", filepath.Join(dir, "SingletonLock")); err != nil {
+	// Chrome writes this as a symlink to host-pid, and the pid is the whole
+	// point: ownership is the named process being alive, not the file existing.
+	if err := os.Symlink(fmt.Sprintf("host-%d", os.Getpid()), filepath.Join(dir, "SingletonLock")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 	if !InUse(dir) {
@@ -89,9 +91,8 @@ func TestInUseFollowsTheSingletonLock(t *testing.T) {
 	}
 }
 
-// A dangling symlink still means "held" -- Lstat must not follow it, or a lock
-// pointing at a dead process would read as free and let two Chromes share the
-// profile.
+// A lock whose target names no pid is held. We cannot tell whether anyone owns
+// it, and guessing "free" is the guess that puts two Chromes on one profile.
 func TestInUseDetectsDanglingLock(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Symlink("/definitely/missing", filepath.Join(dir, "SingletonLock")); err != nil {
@@ -104,7 +105,7 @@ func TestInUseDetectsDanglingLock(t *testing.T) {
 
 func TestClearStaleRemovesLockAndIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.Symlink("host-1234", filepath.Join(dir, "SingletonLock")); err != nil {
+	if err := os.Symlink(fmt.Sprintf("host-%d", os.Getpid()), filepath.Join(dir, "SingletonLock")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 
@@ -122,7 +123,7 @@ func TestClearStaleRemovesLockAndIsIdempotent(t *testing.T) {
 
 func TestOpenRefusesAProfileAlreadyInUse(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.Symlink("host-1234", filepath.Join(dir, "SingletonLock")); err != nil {
+	if err := os.Symlink(fmt.Sprintf("host-%d", os.Getpid()), filepath.Join(dir, "SingletonLock")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 
@@ -380,4 +381,104 @@ func TestFailedStartupFreesTheProfile(t *testing.T) {
 		t.Fatalf("a replacement could not take the profile: %v", err)
 	}
 	_ = replacement.Close()
+}
+
+// A lock is not ownership. Chrome leaves one behind when it is killed, and a
+// lock naming a process that no longer exists means the profile is free --
+// treating it as held would make the service permanently unavailable after one
+// crash.
+func TestStaleLockDoesNotHoldTheProfile(t *testing.T) {
+	dir := t.TempDir()
+
+	// A process that has certainly exited.
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	dead := cmd.Process.Pid
+	if err := os.Symlink(fmt.Sprintf("somehost-%d", dead), filepath.Join(dir, "SingletonLock")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if InUse(dir) {
+		t.Fatal("a lock naming a dead process must not hold the profile")
+	}
+}
+
+// The converse: a lock naming a living process is ownership, and nothing may
+// take the profile while that process is alive.
+func TestLiveLockHoldsTheProfile(t *testing.T) {
+	dir := t.TempDir()
+
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	if err := os.Symlink(fmt.Sprintf("somehost-%d", cmd.Process.Pid), filepath.Join(dir, "SingletonLock")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if !InUse(dir) {
+		t.Fatal("a lock naming a running process must hold the profile")
+	}
+	if err := WaitUntilFree(context.Background(), dir, 200*time.Millisecond); err == nil {
+		t.Fatal("waiting for a held profile must not report it free")
+	}
+
+	// Once the owner goes, the profile is free without anyone cleaning up.
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait() // reap it; a zombie still answers signal 0
+	if err := WaitUntilFree(context.Background(), dir, 5*time.Second); err != nil {
+		t.Fatalf("the profile should free itself when its owner exits: %v", err)
+	}
+}
+
+// An unreadable lock is treated as held: refusing to start is recoverable, two
+// Chromes on one profile is not.
+func TestUnparseableLockIsTreatedAsHeld(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "SingletonLock"), []byte("junk"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !InUse(dir) {
+		t.Fatal("a lock we cannot read must be assumed to hold the profile")
+	}
+}
+
+// A startup that failed while Chrome kept running must leave the profile
+// recorded as held. Returning a plain launch error would let the next caller
+// find an unclaimed directory and start a second browser on it.
+func TestSurvivingStartupKeepsTheProfileClaimed(t *testing.T) {
+	dir := t.TempDir()
+
+	cmd := exec.Command("sleep", "60") // stands in for a Chrome that outlived the kill
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	claimLock(dir, cmd.Process.Pid)
+
+	if !InUse(dir) {
+		t.Fatal("a surviving startup must leave the profile claimed")
+	}
+	if _, err := Open(context.Background(), Options{ProfileDir: dir, Headless: true}); !errors.Is(err, ErrProfileInUse) {
+		t.Fatalf("got %v, want ErrProfileInUse", err)
+	}
+}
+
+// Claiming must never overwrite a record of someone else's ownership.
+func TestClaimDoesNotStealAnExistingLock(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Symlink("somehost-4242", filepath.Join(dir, "SingletonLock")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	claimLock(dir, 9999)
+
+	owner, known := lockOwner(dir)
+	if !known || owner != 4242 {
+		t.Fatalf("got owner %d (known %v); the original claim must stand", owner, known)
+	}
 }

@@ -245,7 +245,12 @@ func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func
 // reads off a directory that may still be owned; the bound keeps a wedged
 // browser from making the service unavailable forever.
 func releaseAfterShutdown(session *browser.Session, reservation pool.Reservation) {
-	err := session.Close()
+	holdUntilFree(session.Close(), session.ProfileDir(), reservation)
+}
+
+// holdUntilFree implements that policy against the two things it actually
+// depends on: whether the shutdown was confirmed, and which profile to watch.
+func holdUntilFree(err error, profileDir string, reservation pool.Reservation) {
 	if err == nil {
 		releaseProfile(reservation)
 		return
@@ -255,15 +260,15 @@ func releaseAfterShutdown(session *browser.Session, reservation pool.Reservation
 	go func() {
 		defer releaseProfile(reservation)
 
-		deadline := time.Now().Add(unconfirmedHold)
-		for time.Now().Before(deadline) {
-			if session.Alive(context.Background()) {
-				time.Sleep(time.Second)
-				continue
-			}
-			return
+		// Ask the profile directory, not the session. Close has already torn
+		// the CDP connection down, so the session reports itself dead whether
+		// or not Chrome is still running -- and believing it would hand the
+		// profile to a read while the write browser still held it. The lock
+		// names the process; the process either exists or it does not.
+		if err := browser.WaitUntilFree(context.Background(), profileDir, unconfirmedHold); err != nil {
+			slog.Warn("write browser still holds the profile; releasing the reservation anyway",
+				"after", unconfirmedHold, "err", err)
 		}
-		slog.Warn("write browser still unconfirmed; releasing the profile anyway", "after", unconfirmedHold)
 	}()
 }
 
