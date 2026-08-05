@@ -117,9 +117,6 @@ type Pool struct {
 	// be handed out either, so it is held here until the last one drains.
 	retiring Session
 
-	// drained wakes waiters when the last lease is returned.
-	drained *sync.Cond
-
 	now       func() time.Time
 	afterFunc func(time.Duration, func()) *time.Timer
 }
@@ -133,7 +130,6 @@ func New(open Opener, idle time.Duration) *Pool {
 		now:       time.Now,
 		afterFunc: time.AfterFunc,
 	}
-	p.drained = sync.NewCond(&p.mu)
 	return p
 }
 
@@ -212,7 +208,6 @@ func (p *Pool) beginCloseLocked(s Session) {
 		if p.closing == done {
 			p.closing = nil
 		}
-		p.drained.Broadcast()
 		p.mu.Unlock()
 		close(done)
 	}()
@@ -298,7 +293,6 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 			}
 			// Exactly one place starts the shutdown, once nothing holds it.
 			p.closeRetiredLocked()
-			p.drained.Broadcast()
 			p.mu.Unlock()
 			continue
 		}
@@ -350,7 +344,6 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 			}
 			p.opening = nil
 			close(done)
-			p.drained.Broadcast()
 			p.mu.Unlock()
 
 			launched <- err
@@ -404,21 +397,17 @@ func (p *Pool) Reserve(ctx context.Context) (Reservation, error) {
 	// With acquires blocked, wait for the profile to go quiet. Leases alone are
 	// not enough: a caller may already be launching a browser without holding
 	// one, and a retiring Chrome keeps the profile lock until it exits.
-	drained := make(chan struct{})
-	go func() {
-		p.mu.Lock()
-		for !p.quietLocked() && !p.closed {
-			p.drained.Wait()
-		}
-		p.mu.Unlock()
-		close(drained)
-	}()
-
-	select {
-	case <-ctx.Done():
+	if err := p.await(ctx, 0, func() bool { return p.quietLocked() || p.closed }); err != nil {
 		p.releaseExclusive(done)
-		return nil, ctx.Err()
-	case <-drained:
+		return nil, err
+	}
+
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		p.releaseExclusive(done)
+		return nil, ErrClosed
 	}
 
 	// Close synchronously: the caller is about to put its own Chrome on this
@@ -459,7 +448,6 @@ func (p *Pool) releaseExclusive(done chan struct{}) {
 	if p.exclusive == done {
 		p.exclusive = nil
 	}
-	p.drained.Broadcast()
 	p.mu.Unlock()
 	close(done)
 }
@@ -474,7 +462,6 @@ func (p *Pool) release() {
 	if p.leases == 0 {
 		// A session retired mid-use is closed now that nothing holds it.
 		p.closeRetiredLocked()
-		p.drained.Broadcast()
 		p.armIdleTimerLocked()
 	}
 }
@@ -486,7 +473,6 @@ func (p *Pool) Close() {
 	p.stopIdleTimerLocked()
 	session := p.session
 	p.session = nil
-	p.drained.Broadcast()
 	p.mu.Unlock()
 
 	if session != nil {
@@ -504,22 +490,51 @@ func (p *Pool) Close() {
 	// keep a retiring session alive and hang shutdown behind it, and a server
 	// that will not exit is a worse failure than a browser left running -- one
 	// the user can see and quit.
-	quiet := make(chan struct{})
-	go func() {
-		p.mu.Lock()
-		for p.opening != nil || p.closing != nil || p.retiring != nil {
-			p.drained.Wait()
-		}
-		p.mu.Unlock()
-		close(quiet)
-	}()
-
-	select {
-	case <-quiet:
-	case <-time.After(shutdownWait):
-		slog.Warn("gave up waiting for the browser to shut down", "after", shutdownWait)
+	inFlight := func() bool {
+		return p.opening == nil && p.closing == nil && p.retiring == nil
+	}
+	if err := p.await(context.Background(), shutdownWait, inFlight); err != nil {
+		slog.Warn("gave up waiting for the browser to shut down", "after", shutdownWait, "err", err)
 	}
 }
+
+// await blocks until ready reports true, the context is done, or the budget runs
+// out; a budget of zero or less means no deadline. ready is called with the lock
+// held.
+//
+// It polls rather than waiting on a condition variable. Every wait in this
+// package is bounded by a caller's deadline or a shutdown budget, and a
+// sync.Cond cannot be woken by either -- which is what used to leave waiter
+// goroutines blocked for the life of the process once a wait gave up. The
+// interval costs a few milliseconds against waits that last for seconds.
+func (p *Pool) await(ctx context.Context, budget time.Duration, ready func() bool) error {
+	var deadline time.Time
+	if budget > 0 {
+		deadline = time.Now().Add(budget)
+	}
+
+	for {
+		p.mu.Lock()
+		done := ready()
+		p.mu.Unlock()
+		if done {
+			return nil
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return fmt.Errorf("the pool was still busy after %s", budget)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// pollInterval is how often await rechecks. Small enough not to add noticeable
+// latency to a handoff, large enough not to spin.
+const pollInterval = 5 * time.Millisecond
 
 // shutdownWait bounds how long Close waits for in-flight browser work. It is a
 // variable so tests can shorten it.

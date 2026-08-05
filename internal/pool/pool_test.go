@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1183,5 +1184,49 @@ func TestCloseGivesUpOnALeaseThatNeverReturns(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close hung on a lease that was never returned")
+	}
+}
+
+// A wait that gives up must not leave anything behind waiting. A bounded wait
+// whose waiter cannot be woken by the deadline blocks for the life of the
+// process, and one per shutdown attempt accumulates.
+func TestGivingUpOnAWaitLeavesNoGoroutineBehind(t *testing.T) {
+	open, _, _ := counting()
+	p := New(open, time.Minute)
+
+	lease, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer lease.Release()
+
+	// A retired session with a lease still out: nothing can finish draining.
+	p.mu.Lock()
+	p.retireLocked(lease.Session)
+	p.mu.Unlock()
+
+	original := shutdownWait
+	shutdownWait = 20 * time.Millisecond
+	defer func() { shutdownWait = original }()
+
+	settle := func() int {
+		time.Sleep(150 * time.Millisecond)
+		return runtime.NumGoroutine()
+	}
+	before := settle()
+
+	// Several waits that all have to give up: a shutdown, and reservations that
+	// can never be granted.
+	for range 5 {
+		p.Close()
+	}
+	for range 5 {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		_, _ = p.Reserve(ctx)
+		cancel()
+	}
+
+	if after := settle(); after > before+2 {
+		t.Fatalf("goroutines grew from %d to %d; waits that gave up are still parked", before, after)
 	}
 }
