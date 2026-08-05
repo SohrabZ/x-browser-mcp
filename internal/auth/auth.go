@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/SohrabZ/x-browser-mcp/internal/browser"
@@ -324,16 +325,16 @@ func (m *Manager) watch(att *attempt) {
 	select {
 	case <-att.done:
 	case <-timer.C:
-		// The deadline passed, but that says nothing about whether the user
-		// closed the window. Chrome still owns the profile, so the reservation
-		// is kept and the wait continues.
+		// The deadline is a bound on how long the profile may be unavailable,
+		// so it has to be enforced: an abandoned window would otherwise block
+		// every read and write for as long as it stayed open.
 		//
-		// Killing the window here would be worse than waiting: it would discard
-		// a sign-in the user may be part way through. Releasing the profile
-		// instead would hand the directory to a read while Chrome still holds
-		// it, which is the single-owner invariant this exists to protect.
-		slog.Warn("x login is taking longer than the timeout; still waiting for the window to close",
-			"deadline", att.deadline)
+		// Ownership is still not released on the timer alone -- Chrome holds
+		// the profile until it exits. The window is asked to quit, and the wait
+		// continues until it actually has.
+		slog.Warn("x login exceeded its timeout; closing the window",
+			"deadline", att.deadline, "timeout", m.opts.LoginTimeout)
+		closeLoginWindow(att)
 		<-att.done
 	}
 
@@ -350,8 +351,47 @@ func (m *Manager) watch(att *attempt) {
 	}
 }
 
+// graceWait is how long a login window gets to shut down cleanly before it is
+// killed outright.
+//
+// The signal matters: Chrome writes cookies and releases its profile lock on a
+// clean exit, so a sign-in the user just completed survives being asked to
+// quit. Killing without asking first would risk discarding it.
+const graceWait = 15 * time.Second
+
+// closeLoginWindow asks the login browser to quit, then insists.
+func closeLoginWindow(att *attempt) {
+	if att.cmd == nil || att.cmd.Process == nil {
+		return
+	}
+
+	if err := att.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		// Already gone, or not signallable; the wait below settles it either way.
+		return
+	}
+
+	select {
+	case <-att.done:
+		return
+	case <-time.After(graceWait):
+	}
+
+	slog.Warn("login window did not exit after being asked; killing it")
+	_ = att.cmd.Process.Kill()
+}
+
+// waitFor reports the login process exiting.
+//
+// The channel is closed after the result is sent, so more than one place can
+// wait on it: the deadline handler watches for the window to go away after
+// asking it to quit, and the watcher waits for the same thing before releasing
+// the profile. A plain send would let the first receiver swallow the only
+// value and leave the second blocked forever.
 func waitFor(cmd *exec.Cmd) <-chan error {
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	go func() {
+		done <- cmd.Wait()
+		close(done)
+	}()
 	return done
 }

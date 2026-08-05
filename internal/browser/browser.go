@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -76,6 +77,10 @@ type Session struct {
 	// created and is safe to delete on close.
 	persistent bool
 
+	// profileDir is retained so Close can confirm the profile was actually
+	// released, rather than assuming it.
+	profileDir string
+
 	// release is called once on Close, so a caller holding the profile can be
 	// unblocked without this package knowing why it was held.
 	release func()
@@ -113,7 +118,7 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 		return nil, fmt.Errorf("connect to chrome: %w", err)
 	}
 
-	return &Session{browser: b, l: l, persistent: persistent}, nil
+	return &Session{browser: b, l: l, persistent: persistent, profileDir: opts.ProfileDir}, nil
 }
 
 // OnClose registers a callback run once when the session closes.
@@ -160,13 +165,28 @@ func (s *Session) Cookies() ([]*proto.NetworkCookie, error) {
 	return s.browser.GetCookies()
 }
 
-// Close shuts down Chrome and releases the profile.
+// exitWait bounds how long Close waits for Chrome to actually go away. Chrome
+// normally exits in well under a second; this only has to stop a wedged process
+// from blocking the caller forever.
+const exitWait = 10 * time.Second
+
+// Close shuts down Chrome and does not return until the profile is free.
+//
+// rod's Kill signals the process and returns immediately, so Close completing
+// is not by itself proof that Chrome let go. Anything that takes the profile
+// next -- a login window, a write, a replacement read -- would then be starting
+// against a directory the old process still holds. Close therefore waits for
+// the process to exit, and clears a lock file that a killed Chrome left behind.
 func (s *Session) Close() {
 	if s.browser != nil {
 		_ = s.browser.Close()
 	}
+
 	if s.l != nil {
+		pid := s.l.PID()
 		s.l.Kill()
+		waitForExit(pid, exitWait)
+
 		// rod always sets a user-data-dir -- its own temp one when we supply no
 		// profile -- so ownership is tracked explicitly rather than inferred from
 		// that flag being empty, which it never is.
@@ -174,9 +194,37 @@ func (s *Session) Close() {
 			go s.l.Cleanup()
 		}
 	}
+
+	// A Chrome that was killed rather than quit leaves its lock behind. With the
+	// process gone the lock is stale, and leaving it would block every later
+	// launch with a profile-in-use error.
+	if s.persistent && s.profileDir != "" && InUse(s.profileDir) {
+		_ = ClearStale(s.profileDir)
+	}
+
 	if s.release != nil {
 		s.release()
 		s.release = nil
+	}
+}
+
+// waitForExit blocks until the process is gone or the budget runs out.
+func waitForExit(pid int, budget time.Duration) {
+	if pid <= 0 {
+		return
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		// On Unix, signal 0 tests for existence without delivering anything.
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			return // gone
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

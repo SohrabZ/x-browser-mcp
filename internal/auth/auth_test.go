@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -258,5 +259,52 @@ func TestRequirePassesWhenSignedIn(t *testing.T) {
 
 	if err := m.Require(t.Context()); err != nil {
 		t.Fatalf("expected a signed-in session to pass, got %v", err)
+	}
+}
+
+// An abandoned login window must not block reads and writes forever. The
+// deadline is a bound on how long the profile may be unavailable, so it is
+// enforced by closing the window -- but ownership is still only released once
+// the process has actually exited.
+func TestAbandonedLoginIsClosedAtTheDeadline(t *testing.T) {
+	// A real process that would otherwise outlive the deadline by minutes.
+	cmd := exec.Command("sleep", "120")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	m := New(Options{LoginTimeout: 50 * time.Millisecond})
+	res := &fakeReservation{}
+	att := &attempt{
+		cmd:      cmd,
+		done:     waitFor(cmd),
+		deadline: time.Now().Add(50 * time.Millisecond),
+		profile:  res,
+	}
+	m.login = att
+
+	done := make(chan struct{})
+	go func() { m.watch(att); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("an abandoned login blocked the profile past its deadline")
+	}
+
+	if !res.released.Load() {
+		t.Error("the profile should be released once the window is gone")
+	}
+	m.mu.Lock()
+	cleared := m.login == nil
+	m.mu.Unlock()
+	if !cleared {
+		t.Error("the login marker should be cleared")
+	}
+
+	// The process really exited rather than being merely forgotten.
+	if err := cmd.Process.Signal(syscall.Signal(0)); err == nil {
+		t.Error("the login process is still running after the deadline")
 	}
 }

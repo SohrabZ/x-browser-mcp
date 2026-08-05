@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -208,4 +209,53 @@ func TestLeasedPageHonoursCallerDeadline(t *testing.T) {
 	if elapsed > 15*time.Second {
 		t.Fatalf("navigation ran for %s; the caller's deadline did not interrupt it", elapsed)
 	}
+}
+
+// Close must not return until Chrome has actually exited and the profile is
+// free. rod's Kill only signals the process, so treating Close as the handoff
+// signal would let a login, a write, or a replacement read start against a
+// directory the old process still holds.
+func TestCloseWaitsForChromeToExitAndFreesTheProfile(t *testing.T) {
+	chrome := ChromePathForTest()
+	if chrome == "" {
+		t.Skip("no Chrome installed")
+	}
+
+	dir := t.TempDir()
+	sess, err := Open(context.Background(), Options{
+		ChromePath: chrome,
+		ProfileDir: dir,
+		Headless:   true,
+	})
+	if err != nil {
+		t.Skipf("cannot start chrome: %v", err)
+	}
+
+	pid := sess.l.PID()
+	if pid <= 0 {
+		t.Fatal("no browser pid to observe")
+	}
+	if !InUse(dir) {
+		t.Fatal("a running browser should hold the profile lock")
+	}
+
+	sess.Close()
+
+	// The process is gone, not merely signalled.
+	if proc, err := os.FindProcess(pid); err == nil {
+		if err := proc.Signal(syscall.Signal(0)); err == nil {
+			t.Error("Close returned while the Chrome process was still alive")
+		}
+	}
+	// And the profile is takeable: this is the invariant callers depend on.
+	if InUse(dir) {
+		t.Error("Close returned while the profile lock was still held")
+	}
+	replacement, err := Open(context.Background(), Options{
+		ChromePath: chrome, ProfileDir: dir, Headless: true,
+	})
+	if err != nil {
+		t.Fatalf("a replacement could not take the profile after Close: %v", err)
+	}
+	replacement.Close()
 }
