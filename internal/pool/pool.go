@@ -312,7 +312,11 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 			if p.leases > 0 {
 				p.leases--
 			}
-			if !healthy {
+			// Only retire a session the pool still holds. If it has already
+			// been taken -- by another prober, or by a shutdown -- its disposal
+			// belongs to whoever took it, and retiring it here would start a
+			// second teardown of the same browser alongside the first.
+			if !healthy && !retired {
 				p.retireLocked(candidate)
 			}
 			// Exactly one place starts the shutdown, once nothing holds it.

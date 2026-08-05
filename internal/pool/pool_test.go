@@ -1312,3 +1312,67 @@ func TestAcquireWaitsForARetiringSessionToGo(t *testing.T) {
 		t.Fatal("the retired browser was never shut down")
 	}
 }
+
+// Whoever takes the session closes it, and only one caller can take it. A probe
+// that finds a dead browser must not retire one the pool no longer holds: a
+// shutdown has already taken it, and a second teardown would race the first.
+func TestAProbeDoesNotCloseASessionShutdownAlreadyTook(t *testing.T) {
+	probing := make(chan struct{})
+	finish := make(chan struct{})
+	session := &blockingProbe{probing: probing, finish: finish}
+
+	p := New(func(context.Context) (Session, error) { return session, nil }, time.Minute)
+
+	// Warm the pool, then start an acquire that blocks inside its liveness probe.
+	lease, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	lease.Release()
+
+	acquired := make(chan struct{})
+	go func() {
+		l, err := p.Acquire(context.Background())
+		if err == nil {
+			l.Release()
+		}
+		close(acquired)
+	}()
+	<-probing
+
+	// Shutdown takes the session and closes it while the probe is still asking.
+	p.Close()
+
+	// The probe now reports the browser dead -- which it is, because the
+	// shutdown closed it.
+	close(finish)
+	<-acquired
+
+	// A second teardown would be started in the background, so give it every
+	// chance to run before concluding it did not.
+	time.Sleep(250 * time.Millisecond)
+
+	if got := session.closes.Load(); got != 1 {
+		t.Fatalf("the session was closed %d times; exactly one teardown may run", got)
+	}
+}
+
+// blockingProbe answers the first liveness check normally, then holds the next
+// one open until the test lets it go.
+type blockingProbe struct {
+	probing chan struct{}
+	finish  chan struct{}
+	probes  atomic.Int64
+	closes  atomic.Int64
+}
+
+func (b *blockingProbe) Close() error { b.closes.Add(1); return nil }
+
+func (b *blockingProbe) Alive(context.Context) bool {
+	if b.probes.Add(1) == 1 {
+		return true // the warm-up check
+	}
+	close(b.probing)
+	<-b.finish
+	return false // by now the shutdown really has closed it
+}
