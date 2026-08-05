@@ -27,11 +27,12 @@ const MaxPostRunes = 280
 
 // Action names, used in the audit log and error messages.
 const (
-	ActionPost     = "post"
-	ActionReply    = "reply"
-	ActionLike     = "like"
-	ActionRepost   = "repost"
-	ActionBookmark = "bookmark"
+	ActionPost       = "post"
+	ActionReply      = "reply"
+	ActionLike       = "like"
+	ActionRepost     = "repost"
+	ActionBookmark   = "bookmark"
+	ActionUnbookmark = "unbookmark"
 )
 
 // Opener starts a browser session against the persistent profile.
@@ -154,7 +155,7 @@ func (w *Writer) Repost(ctx context.Context, handle, postID, confirm string) err
 			return err
 		}
 		if !hasOnPost(p, postID, xui.SelUnrepostButton, engagementWait) {
-			return errors.New("repost did not take effect: X still shows the action as available")
+			return errors.New("repost did not take effect: X never showed it as applied")
 		}
 		settled()
 
@@ -165,6 +166,12 @@ func (w *Writer) Repost(ctx context.Context, handle, postID, confirm string) err
 // Bookmark saves a post.
 func (w *Writer) Bookmark(ctx context.Context, handle, postID, confirm string) error {
 	return w.tap(ctx, ActionBookmark, handle, postID, confirm, xui.SelBookmarkAdd, xui.SelBookmarkRemove)
+}
+
+// Unbookmark removes a post from the bookmarks. X toggles the same control, so
+// this is Bookmark with the two selectors the other way round.
+func (w *Writer) Unbookmark(ctx context.Context, handle, postID, confirm string) error {
+	return w.tap(ctx, ActionUnbookmark, handle, postID, confirm, xui.SelBookmarkRemove, xui.SelBookmarkAdd)
 }
 
 // tap is the shared shape for single-button actions.
@@ -201,7 +208,7 @@ func (w *Writer) tap(ctx context.Context, action, handle, postID, confirm, butto
 		// is torn down immediately after this returns, which is enough to lose
 		// a request still in flight. Wait for the control to flip.
 		if !hasOnPost(p, postID, alreadyDone, engagementWait) {
-			return fmt.Errorf("%s did not take effect: X still shows the action as available", action)
+			return fmt.Errorf("%s did not take effect: X never showed it as applied", action)
 		}
 		// The control flipping is not the action either. X updates it
 		// optimistically, before its request has completed, so anything that
@@ -224,10 +231,10 @@ func (w *Writer) tap(ctx context.Context, action, handle, postID, confirm, butto
 func postTarget(handle, postID string) (string, error) {
 	h := xui.NormalizeHandle(handle)
 	if h == "" {
-		return "", errors.New("handle is required")
+		return "", invalid("handle is required")
 	}
 	if !xui.ValidPostID(postID) {
-		return "", fmt.Errorf("post id must be the digits X gives a post, got %q", postID)
+		return "", invalid("post id must be the digits X gives a post, got %q", postID)
 	}
 	return xui.PostURL(h, postID), nil
 }
@@ -240,7 +247,7 @@ func confirmApplied(p *browser.Page, target, postID, alreadyDone, action string)
 		return fmt.Errorf("confirm %s: %w", action, err)
 	}
 	if !hasOnPost(p, postID, alreadyDone, engagementWait) {
-		return fmt.Errorf("%s did not stick: X shows the action as still available after reloading the post", action)
+		return fmt.Errorf("%s did not stick: X did not show it as applied after reloading the post", action)
 	}
 	return nil
 }
@@ -421,14 +428,25 @@ func (w *Writer) fail(rec Record, err error) error {
 	return err
 }
 
+// InvalidError marks a request the caller got wrong, as distinct from a write
+// that was attempted and did not take effect. The two deserve different
+// answers: one is worth correcting and sending again, the other is not.
+type InvalidError struct{ Reason string }
+
+func (e *InvalidError) Error() string { return e.Reason }
+
+func invalid(format string, a ...any) error {
+	return &InvalidError{Reason: fmt.Sprintf(format, a...)}
+}
+
 // ValidateText rejects post text X would not accept.
 func ValidateText(text string) error {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
-		return errors.New("post text is required")
+		return invalid("post text is required")
 	}
 	if n := len([]rune(trimmed)); n > MaxPostRunes {
-		return fmt.Errorf("post is %d characters; the limit is %d", n, MaxPostRunes)
+		return invalid("post is %d characters; the limit is %d", n, MaxPostRunes)
 	}
 	return nil
 }

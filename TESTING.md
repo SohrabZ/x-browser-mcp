@@ -118,7 +118,7 @@ Connectivity first:
 
 ```bash
 claude mcp list                  # expect: x-browser-mcp ... ✔ Connected
-hermes mcp test x-browser-mcp    # expect: ✓ Tools discovered: 9
+hermes mcp test x-browser-mcp    # expect: ✓ Tools discovered: 9 (15 with -allow-writes)
 ```
 
 Connectivity is not the interesting part. **Tool descriptions are prompts**, and
@@ -180,7 +180,7 @@ claude -p "Use the x-browser-mcp tools to read my X home timeline (5 posts). \
 Check all four properties:
 
 1. Without `-allow-writes`, `tools/list` returns **no** write tools.
-2. With it, the five appear and the terminal prints a confirmation token.
+2. With it, the six appear and the terminal prints a confirmation token.
 3. A write with a wrong token is refused and recorded in
    `~/.x-browser-mcp/writes.log`.
 4. A write with no token at all is rejected by schema validation.
@@ -213,8 +213,8 @@ hermes -z "Use the x-browser-mcp tool like_post on handle <you>, \
 Then open the post yourself and look. If the tool said `Liked.` and the post
 shows a like button rather than an unlike button, the tool is lying to you.
 
-Run each of `post_to_x`, `reply_to_post`, `like_post`, `repost_post` and
-`bookmark_post` this way at least once before a release. They fail differently:
+Run each of `post_to_x`, `reply_to_post`, `like_post`, `repost_post`,
+`bookmark_post` and `unbookmark_post` this way at least once before a release. They fail differently:
 posting works while replying does not, because their composers behave
 differently; liking fails in a way that leaves the page looking correct.
 

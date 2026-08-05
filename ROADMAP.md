@@ -9,9 +9,10 @@ Nothing here is a commitment to a date.
 its replies, bookmarks, lists, and any x.com link via `read_x_url`. Posts carry
 attached images, and X Articles carry their title and body.
 
-**Writing** — post, reply, like, repost, bookmark. Off unless `-allow-writes`,
-and unregistered as tools when off. Each requires a confirmation token minted at
-startup, paced like a person, and recorded in an append-only audit log.
+**Writing** — post, reply, like, repost, bookmark, and removing a bookmark. Off
+unless `-allow-writes`, and unregistered when off. Each requires a confirmation
+token minted at startup, paced like a person, and recorded in an append-only
+audit log.
 
 **Interfaces** — MCP over streamable HTTP, plus a REST API.
 

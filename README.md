@@ -102,7 +102,7 @@ chose to show you.
 
 **Write** (off by default, see [Writing](#writing))
 
-- Post, reply, like, repost, bookmark
+- Post, reply, like, repost, bookmark, remove a bookmark
 
 Everything is available over both MCP and a plain HTTP API.
 
@@ -180,9 +180,10 @@ Point a streamable-HTTP MCP client at `http://127.0.0.1:18110/mcp`, or use
 | `like_post`          | like a post                             | browser automation  | **no** — `-allow-writes` |
 | `repost_post`        | repost a post                           | browser automation  | **no** — `-allow-writes` |
 | `bookmark_post`      | save a post                             | browser automation  | **no** — `-allow-writes` |
+| `unbookmark_post`    | remove a saved post                     | browser automation  | **no** — `-allow-writes` |
 
 > [!NOTE]
-> When writes are disabled the five write tools are not registered at all, so a
+> When writes are disabled the six write tools are not registered at all, so a
 > connected model cannot see or call them. See [Writing](#writing).
 
 ## HTTP API
@@ -199,6 +200,22 @@ GET  /api/v1/thread/{handle}/{id}
 POST /api/v1/search      {"query":"...","mode":"latest","limit":5}
 POST /mcp
 ```
+
+With `-allow-writes`, and not registered at all without it:
+
+```
+POST /api/v1/post        {"text":"...","confirm":"..."}
+POST /api/v1/reply       {"handle":"...","post_id":"...","text":"...","confirm":"..."}
+POST /api/v1/like        {"handle":"...","post_id":"...","confirm":"..."}
+POST /api/v1/repost      {"handle":"...","post_id":"...","confirm":"..."}
+POST /api/v1/bookmark    {"handle":"...","post_id":"...","confirm":"..."}
+POST /api/v1/unbookmark  {"handle":"...","post_id":"...","confirm":"..."}
+```
+
+A write answers `{"ok":true,"action":"like"}`, or an `error` saying what went
+wrong: `403` if the token is wrong, `400` if the request is, `412` if the session
+needs a sign-in, `429` if the write budget is spent, and `502` if the action was
+attempted and X did not apply it.
 
 ## Writing
 
