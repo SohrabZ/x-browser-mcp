@@ -16,8 +16,9 @@ type fakeSession struct {
 	dead   atomic.Bool
 }
 
-func (f *fakeSession) Close()      { f.closed.Store(true) }
-func (f *fakeSession) Alive() bool { return !f.dead.Load() }
+func (f *fakeSession) Close() error { f.closed.Store(true); return nil }
+
+func (f *fakeSession) Alive(context.Context) bool { return !f.dead.Load() }
 
 // counting returns an opener that hands out numbered sessions and counts how
 // many browsers were launched -- the number this whole package exists to reduce.
@@ -522,11 +523,11 @@ type blockingSession struct {
 	closeGate chan struct{}
 }
 
-func (b *blockingSession) Close() {
+func (b *blockingSession) Close() error {
 	if b.closeGate != nil {
 		<-b.closeGate
 	}
-	b.fakeSession.Close()
+	return b.fakeSession.Close()
 }
 
 // A caller that has claimed the launch holds no lease yet, but is about to own
@@ -663,8 +664,170 @@ type countedSession struct {
 	live *atomic.Int64
 }
 
-func (c *countedSession) Close() {
+func (c *countedSession) Close() error {
 	time.Sleep(10 * time.Millisecond) // shutting down
 	c.live.Add(-1)
-	c.fakeSession.Close()
+	return c.fakeSession.Close()
+}
+
+// A launch outlives the caller that started it. Dropping the opening claim when
+// that caller times out would let the next acquire or reservation go at the same
+// profile while the first Chrome was still coming up.
+func TestTimedOutLaunchKeepsTheOpeningClaim(t *testing.T) {
+	launching := make(chan struct{})
+	finish := make(chan struct{})
+	var launches atomic.Int64
+
+	p := New(func(context.Context) (Session, error) {
+		if launches.Add(1) == 1 {
+			close(launching)
+			<-finish
+		}
+		return &fakeSession{}, nil
+	}, time.Minute)
+	defer p.Close()
+
+	// First caller gives up while Chrome is still starting.
+	impatient, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	if _, err := p.Acquire(impatient); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected the impatient caller to time out, got %v", err)
+	}
+	<-launching
+
+	// A second caller must wait for that launch, not start its own.
+	second := make(chan struct{})
+	go func() {
+		l, err := p.Acquire(context.Background())
+		if err == nil {
+			l.Release()
+		}
+		close(second)
+	}()
+
+	select {
+	case <-second:
+		t.Fatal("a second acquire proceeded while the first launch was in flight")
+	case <-time.After(80 * time.Millisecond):
+	}
+	if got := launches.Load(); got != 1 {
+		t.Fatalf("a second browser was launched behind the first, got %d launches", got)
+	}
+
+	close(finish)
+	select {
+	case <-second:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the second acquire never completed")
+	}
+}
+
+// unconfirmedSession stands in for a Chrome that outlived its shutdown and may
+// still hold the profile.
+type unconfirmedSession struct{ fakeSession }
+
+func (u *unconfirmedSession) Close() error {
+	u.fakeSession.closed.Store(true)
+	return errors.New("chrome did not exit")
+}
+
+// A reservation is a promise that nothing else holds the profile. If a shutdown
+// could not confirm the browser exited, that promise cannot be made: a login or
+// write would start against a directory some surviving Chrome still owns.
+func TestReserveRefusesWhenReleaseIsUnconfirmed(t *testing.T) {
+	p := New(func(context.Context) (Session, error) {
+		return &unconfirmedSession{}, nil
+	}, time.Minute)
+	defer p.Close()
+
+	l, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	l.Release()
+
+	if _, err := p.Reserve(t.Context()); err == nil {
+		t.Fatal("a reservation was granted although the browser was never confirmed gone")
+	}
+
+	// And the refusal must not leave the profile permanently blocked.
+	blocked := make(chan struct{})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, _ = p.Reserve(ctx)
+		close(blocked)
+	}()
+	select {
+	case <-blocked:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a refused reservation left exclusivity asserted")
+	}
+}
+
+// wedgedSession is running but unresponsive: Alive never answers on its own.
+type wedgedSession struct {
+	fakeSession
+	probing chan struct{}
+}
+
+func (w *wedgedSession) Alive(ctx context.Context) bool {
+	select {
+	case w.probing <- struct{}{}:
+	default:
+	}
+	<-ctx.Done() // never answers; only the probe's deadline ends this
+	return false
+}
+
+// The liveness probe is browser I/O. Running it under the pool mutex would let a
+// wedged connection stall every read, write, login and shutdown behind the same
+// lock, so a reservation must stay reachable while a probe is stuck.
+func TestWedgedLivenessProbeDoesNotBlockThePool(t *testing.T) {
+	wedged := &wedgedSession{probing: make(chan struct{}, 1)}
+	var launches atomic.Int64
+
+	p := New(func(context.Context) (Session, error) {
+		if launches.Add(1) == 1 {
+			return wedged, nil
+		}
+		return &fakeSession{}, nil
+	}, time.Minute)
+	defer p.Close()
+
+	// Warm the wedged session into the pool.
+	p.mu.Lock()
+	p.session = wedged
+	p.mu.Unlock()
+
+	go func() {
+		l, err := p.Acquire(context.Background())
+		if err == nil {
+			l.Release()
+		}
+	}()
+	<-wedged.probing // a probe is now stuck
+
+	// Reserve must actually succeed, not merely return. A probe that never
+	// answers would keep its lease forever and the reservation would time out --
+	// which is why this asserts the error, not just that the call finished.
+	result := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		res, err := p.Reserve(ctx)
+		if res != nil {
+			res.Release()
+		}
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("a wedged liveness probe blocked the pool: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("reserve never returned while a liveness probe was wedged")
+	}
 }

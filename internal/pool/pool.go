@@ -20,6 +20,7 @@ package pool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -28,8 +29,13 @@ import (
 var ErrClosed = errors.New("browser pool is closed")
 
 // Session is the part of a browser session the pool manages.
+//
+// Close reports whether the profile was confirmed released. A browser that
+// outlives its shutdown still owns the directory, and the pool must not hand
+// that directory to a login or a write on the strength of Close merely having
+// returned.
 type Session interface {
-	Close()
+	Close() error
 }
 
 // Checker is a session that can report whether it is still usable.
@@ -38,13 +44,29 @@ type Session interface {
 // crash, be killed, or be quit by the user, and the session then fails every
 // call with a closed-connection error. Sessions implementing this are checked
 // before being handed out so a dead browser is replaced rather than reused.
+//
+// The probe takes a context because it is browser I/O: a Chrome that is running
+// but whose connection has wedged would otherwise never answer.
 type Checker interface {
-	Alive() bool
+	Alive(ctx context.Context) bool
 }
 
-func alive(s Session) bool {
+// probeTimeout bounds the liveness check. It is short because the answer is
+// only interesting when it comes back quickly; a browser that cannot respond in
+// a second is not one to hand to a reader.
+const probeTimeout = time.Second
+
+// alive probes a session. It must never be called while holding the pool mutex:
+// this is browser I/O, and blocking here would stall every read, write, login
+// and shutdown behind the same lock.
+func alive(ctx context.Context, s Session) bool {
 	c, ok := s.(Checker)
-	return !ok || c.Alive()
+	if !ok {
+		return true
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	return c.Alive(probeCtx)
 }
 
 // Opener starts a new session.
@@ -89,12 +111,21 @@ type Pool struct {
 	// is closed on release, which is what waiting acquires block on.
 	exclusive chan struct{}
 
+	// unreleased records a shutdown that could not confirm the browser exited.
+	// While set, the profile may still be held by a process the pool no longer
+	// tracks, so exclusivity cannot honestly be granted.
+	unreleased error
+
 	// drained wakes waiters when the last lease is returned.
 	drained *sync.Cond
 
 	now       func() time.Time
 	afterFunc func(time.Duration, func()) *time.Timer
 }
+
+// launchBudget bounds a browser launch that no caller is waiting for any more.
+// Without it a wedged Chrome would hold the pool's opening claim forever.
+const launchBudget = 2 * time.Minute
 
 // New builds a pool. A session with no outstanding leases is closed once it has
 // been idle for the given duration; zero disables warming entirely.
@@ -109,6 +140,19 @@ func New(open Opener, idle time.Duration) *Pool {
 	return p
 }
 
+// launchContext bounds a launch independently of whoever asked for it, since
+// the launch outlives an impatient caller.
+func (p *Pool) launchContext() context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), launchBudget)
+	// The launch either finishes or is abandoned at the budget; either way the
+	// context is released then.
+	go func() {
+		<-ctx.Done()
+		cancel()
+	}()
+	return ctx
+}
+
 // quietLocked reports that nothing holds or is about to hold the profile: no
 // outstanding leases, no launch in flight, no close still finishing.
 //
@@ -121,6 +165,10 @@ func (p *Pool) quietLocked() bool {
 
 // beginCloseLocked retires a session, tracking the shutdown so nothing opens a
 // replacement while the old Chrome still holds the profile.
+//
+// A shutdown that cannot confirm the process is gone is remembered: the profile
+// may still be held by something this pool no longer tracks, and saying nothing
+// would let the next caller believe it owns a directory it does not.
 func (p *Pool) beginCloseLocked(s Session) {
 	if s == nil {
 		return
@@ -129,11 +177,13 @@ func (p *Pool) beginCloseLocked(s Session) {
 	p.closing = done
 
 	go func() {
-		s.Close()
+		err := s.Close()
+
 		p.mu.Lock()
 		if p.closing == done {
 			p.closing = nil
 		}
+		p.unreleased = err
 		p.drained.Broadcast()
 		p.mu.Unlock()
 		close(done)
@@ -189,24 +239,31 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 			continue
 		}
 
-		// A pooled browser can die without the pool being told -- a crash, an
-		// OOM kill, or the user quitting it -- and then fails every call.
-		// Alive cannot distinguish death from a transient fault, so the old
-		// process is retired properly rather than abandoned.
-		if p.session != nil && !alive(p.session) {
-			dead := p.session
-			p.session = nil
-			p.beginCloseLocked(dead)
-			p.mu.Unlock()
-			continue
-		}
-
-		if p.session != nil {
+		if candidate := p.session; candidate != nil {
+			// Probing is browser I/O and must not happen under the lock: a
+			// wedged connection would otherwise stall every read, write, login
+			// and shutdown behind this mutex. Take a lease first so nothing
+			// retires the session mid-probe, then reconcile.
 			p.stopIdleTimerLocked()
 			p.leases++
-			session := p.session
 			p.mu.Unlock()
-			return &Lease{Session: session, pool: p}, nil
+
+			if alive(ctx, candidate) {
+				return &Lease{Session: candidate, pool: p}, nil
+			}
+
+			// Dead. Give the lease back and retire it, then start over.
+			p.mu.Lock()
+			if p.leases > 0 {
+				p.leases--
+			}
+			if p.session == candidate {
+				p.session = nil
+				p.beginCloseLocked(candidate)
+			}
+			p.drained.Broadcast()
+			p.mu.Unlock()
+			continue
 		}
 
 		// Someone else is already launching; take their result.
@@ -224,41 +281,58 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 		p.opening = done
 		p.mu.Unlock()
 
-		session, err := p.open(ctx)
+		// The launch runs to completion regardless of whether this caller is
+		// still waiting, and the opening claim is held until it does.
+		//
+		// Letting a timed-out caller drop the claim would be the bug it looks
+		// like a fix for: the Chrome it started is still coming up, and the next
+		// acquire or reservation would go at the same profile behind its back.
+		launched := make(chan error, 1)
+		go func() {
+			session, err := p.open(p.launchContext())
 
-		p.mu.Lock()
-		p.opening = nil
-		close(done)
-		// A reservation may be waiting on this launch to finish.
-		p.drained.Broadcast()
+			p.mu.Lock()
+			if err == nil {
+				switch {
+				case p.closed, p.exclusive != nil:
+					// Nobody may have it now; retire it rather than leave a
+					// browser holding the profile untracked.
+					p.beginCloseLocked(session)
+				default:
+					// Chrome started, so the profile was free: any earlier
+					// shutdown that could not be confirmed has evidently
+					// finished.
+					p.unreleased = nil
+					p.session = session
+					// Only schedule an idle close when warming is on. With
+					// warming off, arming here would retire the browser before
+					// the caller waiting on this launch could take it -- and it
+					// would launch another, and another.
+					if p.idle > 0 {
+						p.armIdleTimerLocked()
+					}
+				}
+			}
+			p.opening = nil
+			close(done)
+			p.drained.Broadcast()
+			p.mu.Unlock()
 
-		switch {
-		case err != nil:
-			p.mu.Unlock()
-			return nil, err
-		case p.closed:
-			p.beginCloseLocked(session)
-			p.mu.Unlock()
-			return nil, ErrClosed
-		case p.exclusive != nil:
-			// Reserved while this was launching. Retire it and wait like
-			// everyone else; the reservation waits for that close to finish.
-			p.beginCloseLocked(session)
-			p.mu.Unlock()
+			launched <- err
+		}()
+
+		select {
+		case err := <-launched:
+			if err != nil {
+				return nil, err
+			}
+			// Loop round and take the session that was just stored, which also
+			// re-checks everything that may have changed while launching.
 			continue
-		case ctx.Err() != nil:
-			// The caller gave up mid-launch. The browser is fine, so keep it
-			// warm for the next read rather than discarding a good launch.
-			p.session = session
-			p.armIdleTimerLocked()
-			p.mu.Unlock()
+		case <-ctx.Done():
+			// This caller is done waiting, but the launch is not abandoned: the
+			// claim above stays until it lands.
 			return nil, ctx.Err()
-		default:
-			p.session = session
-			p.stopIdleTimerLocked()
-			p.leases++
-			p.mu.Unlock()
-			return &Lease{Session: session, pool: p}, nil
 		}
 	}
 }
@@ -317,10 +391,21 @@ func (p *Pool) Reserve(ctx context.Context) (Reservation, error) {
 	p.mu.Lock()
 	session := p.session
 	p.session = nil
+	unreleased := p.unreleased
 	p.mu.Unlock()
 
 	if session != nil {
-		session.Close()
+		if err := session.Close(); err != nil {
+			unreleased = err
+		}
+	}
+
+	// Exclusivity is a promise that nothing else holds the profile. If a
+	// shutdown could not confirm that, say so rather than let a login or write
+	// start against a directory some surviving Chrome still owns.
+	if unreleased != nil {
+		p.releaseExclusive(done)
+		return nil, fmt.Errorf("cannot take the profile: %w", unreleased)
 	}
 	return &exclusive{pool: p, done: done}, nil
 }
@@ -370,7 +455,7 @@ func (p *Pool) Close() {
 	p.mu.Unlock()
 
 	if session != nil {
-		session.Close()
+		_ = session.Close()
 	}
 }
 

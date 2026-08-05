@@ -192,13 +192,15 @@ func (s *Session) Page(ctx context.Context) (*Page, error) {
 // or the user quitting it -- after which every call fails with a closed
 // connection. A pooled session is checked before reuse so a dead browser is
 // replaced rather than handed out repeatedly.
-func (s *Session) Alive() bool {
+func (s *Session) Alive(ctx context.Context) bool {
 	if s == nil || s.browser == nil {
 		return false
 	}
-	// Any round trip to the browser proves the connection is live; asking for
-	// the page list is the cheapest one available.
-	_, err := s.browser.Pages()
+	// Any round trip proves the connection is live; the page list is the
+	// cheapest one. It is bound to ctx because a Chrome that is running but
+	// whose CDP connection has wedged would otherwise never answer, and this
+	// probe sits in front of every read.
+	_, err := s.browser.Context(ctx).Pages()
 	return err == nil
 }
 
@@ -219,7 +221,9 @@ const exitWait = 10 * time.Second
 // next -- a login window, a write, a replacement read -- would then be starting
 // against a directory the old process still holds. Close therefore waits for
 // the process to exit, and clears a lock file that a killed Chrome left behind.
-func (s *Session) Close() {
+func (s *Session) Close() error {
+	var unconfirmed error
+
 	if s.browser != nil {
 		_ = s.browser.Close()
 	}
@@ -243,8 +247,12 @@ func (s *Session) Close() {
 		// Chrome that outlived the wait still owns the profile, and deleting its
 		// lock would invite a second browser onto the directory -- far worse than
 		// the profile-in-use error the leftover lock produces.
-		if exited && s.persistent && s.profileDir != "" {
-			clearLockOwnedBy(s.profileDir, pid)
+		if exited {
+			if s.persistent && s.profileDir != "" {
+				clearLockOwnedBy(s.profileDir, pid)
+			}
+		} else {
+			unconfirmed = fmt.Errorf("chrome (pid %d) did not exit within %s; it may still hold the profile", pid, exitWait)
 		}
 	}
 
@@ -252,6 +260,7 @@ func (s *Session) Close() {
 		s.release()
 		s.release = nil
 	}
+	return unconfirmed
 }
 
 // waitForExit blocks until the process is gone, reporting whether that was
