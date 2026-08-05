@@ -408,7 +408,11 @@ func newRequest(method, target string, body io.Reader) *http.Request {
 func TestARequestThatDoesNotAddressThisServerIsRefused(t *testing.T) {
 	h := Handler(Deps{ListenAddr: "127.0.0.1:18110"})
 
-	for _, host := range []string{"evil.example", "attacker.test:18110", "", "127.0.0.1.evil.example"} {
+	for _, host := range []string{
+		"evil.example", "attacker.test:18110", "", "127.0.0.1.evil.example",
+		// Normalising case and the trailing dot must not become a way in.
+		"EVIL.EXAMPLE", "evil.example.", "localhost.evil.example",
+	} {
 		r := httptest.NewRequest(http.MethodGet, "/health", nil)
 		r.Host = host
 
@@ -423,7 +427,12 @@ func TestARequestThatDoesNotAddressThisServerIsRefused(t *testing.T) {
 func TestTheServersOwnNamesAreAccepted(t *testing.T) {
 	h := Handler(Deps{ListenAddr: "127.0.0.1:18110"})
 
-	for _, host := range []string{"127.0.0.1:18110", "localhost:18110", "127.0.0.1", "localhost", "[::1]:18110"} {
+	// Case and a trailing dot name the same host, so a client using either is
+	// this server's own and must not be turned away.
+	for _, host := range []string{
+		"127.0.0.1:18110", "localhost:18110", "127.0.0.1", "localhost", "[::1]:18110", "::1",
+		"LOCALHOST:18110", "LocalHost", "localhost.", "localhost.:18110",
+	} {
 		r := httptest.NewRequest(http.MethodGet, "/health", nil)
 		r.Host = host
 

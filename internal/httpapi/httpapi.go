@@ -173,12 +173,19 @@ func guard(listenAddr string, next http.Handler) http.Handler {
 	})
 }
 
-// hostOf drops the port and any brackets from an address or a Host header.
+// hostOf reduces an address or a Host header to the name it means.
+//
+// Case and a trailing dot are not part of that: a host name is
+// case-insensitive, and "localhost." is the same host as "localhost", so a
+// client using either is this server's own client. Neither loosens the check --
+// "EVIL.EXAMPLE." reduces to "evil.example" and is still not on the list.
 func hostOf(addr string) string {
-	if host, _, err := net.SplitHostPort(addr); err == nil {
-		return strings.Trim(host, "[]")
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
 	}
-	return strings.Trim(addr, "[]")
+	host = strings.Trim(host, "[]")
+	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
 // originHost is the host an Origin names, or "" if it names none -- which is what
