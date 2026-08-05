@@ -151,3 +151,81 @@ func Excerpt(text string, maxRunes int) string {
 func Normalize(text string) string {
 	return strings.Join(strings.Fields(text), " ")
 }
+
+// Notification is one cell of X's notifications timeline.
+//
+// It is not a Post and does not reduce to one. X aggregates: a single cell can
+// say two accounts liked one post, or that one account liked two of yours, and
+// it renders no link to the post in either case. So a notification carries what
+// the cell actually said -- who, when, and the words -- rather than a shape
+// invented to look like a post.
+type Notification struct {
+	// Kind is best effort, and empty when it could not be told.
+	//
+	// X marks the difference between a like and a follow only with an icon that
+	// carries no identifier, and with English words in the text. So this is read
+	// from those words and will be empty under a different interface language,
+	// where Text still says what happened.
+	Kind string `json:"kind,omitempty"`
+
+	// Actors are the accounts the cell names. More than one is normal.
+	Actors []Author `json:"actors,omitempty"`
+
+	// Text is the line X wrote, such as "Ramyar Khalili and Somnia Lab liked
+	// your post". It is the only field guaranteed to describe the event.
+	Text string `json:"text"`
+
+	// PostText is the post the notification concerns, when the cell shows one. A
+	// follow shows none. There is no id or URL to give: the cell links to the
+	// accounts involved and never to the post.
+	PostText string `json:"post_text,omitempty"`
+
+	CreatedAt time.Time `json:"created_at,omitempty"`
+}
+
+// Kinds a notification cell can be recognised as.
+const (
+	NotifLike        = "like"
+	NotifRepost      = "repost"
+	NotifFollow      = "follow"
+	NotifMention     = "mention"
+	NotifReply       = "reply"
+	NotifRecommended = "recommended"
+)
+
+// Usable reports whether a notification says anything at all.
+//
+// Text is the test rather than Kind or Actors, because Text is what X wrote and
+// the other two are read out of it. A cell with no words is a cell that failed
+// to render.
+func (n Notification) Usable() bool { return strings.TrimSpace(n.Text) != "" }
+
+// DedupeNotifications drops repeats and caps the result.
+//
+// Scrolling re-reads cells that were already collected, and a notification has
+// no id to key on, so identity is what the cell said and when. Two genuinely
+// distinct cells with the same words and timestamp would be indistinguishable to
+// anyone reading them, too.
+func DedupeNotifications(items []Notification, limit int) []Notification {
+	if limit <= 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool, len(items))
+	out := make([]Notification, 0, limit)
+	for _, n := range items {
+		if !n.Usable() {
+			continue
+		}
+		key := n.CreatedAt.UTC().Format(time.RFC3339) + "|" + Normalize(n.Text)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, n)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out
+}

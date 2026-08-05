@@ -16,6 +16,11 @@ const (
 	TargetBookmarks TargetKind = "bookmarks"
 	TargetHome      TargetKind = "home"
 	TargetSearch    TargetKind = "search"
+
+	// TargetMentions is the notifications tab that holds posts;
+	// TargetNotifications is the "All" tab, most of which are not posts.
+	TargetMentions      TargetKind = "mentions"
+	TargetNotifications TargetKind = "notifications"
 )
 
 // Target is a parsed x.com URL.
@@ -84,8 +89,16 @@ func ParseURL(raw string) (Target, error) {
 	}
 
 	if reservedPaths[segments[0]] {
-		if segments[0] == "home" {
+		switch {
+		case segments[0] == "home":
 			return Target{Kind: TargetHome}, nil
+		// /notifications is the "All" tab and /notifications/mentions the one
+		// that holds posts. They read differently, so they are separate targets
+		// rather than one with a flag.
+		case segments[0] == "notifications" && len(segments) >= 2 && segments[1] == "mentions":
+			return Target{Kind: TargetMentions}, nil
+		case segments[0] == "notifications" && len(segments) == 1:
+			return Target{Kind: TargetNotifications}, nil
 		}
 		return Target{}, fmt.Errorf("unsupported x.com URL: %q", raw)
 	}
