@@ -142,6 +142,7 @@ func OnLoginWall(currentURL string) bool {
 // shape returned by ExtractScript.
 type RawPost struct {
 	Href      string     `json:"href"`
+	Title     string     `json:"title"`
 	Text      string     `json:"text"`
 	CreatedAt string     `json:"created_at"`
 	Handle    string     `json:"handle"`
@@ -172,14 +173,18 @@ func (r RawPost) ToPost() (model.Post, bool) {
 		}
 	}
 
+	title := model.Normalize(r.Title)
+
 	// Text is deliberately not required. Image-only posts are how visual
-	// self-threads are published, and demanding text dropped them entirely.
-	if handle == "" || id == "" || (text == "" && len(media) == 0) {
+	// self-threads are published, and an X Article carries a title and body
+	// rather than tweet text; demanding text dropped both entirely.
+	if handle == "" || id == "" || (text == "" && title == "" && len(media) == 0) {
 		return model.Post{}, false
 	}
 
 	post := model.Post{
 		ID:     id,
+		Title:  title,
 		Text:   text,
 		URL:    PostURL(handle, id),
 		Author: model.Author{Name: strings.TrimSpace(r.Name), Handle: handle},
@@ -246,9 +251,22 @@ const ExtractScript = `limit => {
       .map(img => ({ url: img.getAttribute('src') || '', alt: img.getAttribute('alt') || '' }))
       .filter(m => m.url && !m.url.includes('profile_images') && !m.url.includes('/emoji/'));
 
+    // X Articles are long-form posts. They render no tweetText at all -- the
+    // headline and body live under their own testids -- so reading only
+    // tweetText returned an article as empty.
+    const articleTitle = article.querySelector('[data-testid="twitter-article-title"]')?.innerText || '';
+    const longform = article.querySelector(
+      '[data-testid="longformRichTextComponent"], [data-testid="twitterArticleRichTextView"]'
+    )?.innerText || '';
+
+    const tweetText = article.querySelector('[data-testid="tweetText"]')?.innerText || '';
+
     return {
       href: link ? (link.getAttribute('href') || '') : '',
-      text: article.querySelector('[data-testid="tweetText"]')?.innerText || '',
+      title: articleTitle,
+      // An article body can run to many thousands of words; cap it so one post
+      // cannot dominate a response.
+      text: (tweetText || longform).slice(0, 6000),
       created_at: time ? (time.getAttribute('datetime') || '') : '',
       handle,
       name: spans.find(s => !s.startsWith('@')) || handle.replace(/^@/, ''),

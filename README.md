@@ -96,6 +96,7 @@ chose to show you.
 - Search, latest or top
 - Any account's posts
 - A post and its replies, including image-only self-threads
+- X Articles — long-form posts, with title and body
 - Your bookmarks
 - Any list timeline
 - Attached images, with alt text where X provides it

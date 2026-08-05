@@ -13,7 +13,10 @@ import (
 // Post is a single X post, normalized to the same shape regardless of whether
 // it came from an API payload or was scraped out of the rendered page.
 type Post struct {
-	ID        string    `json:"id"`
+	ID string `json:"id"`
+	// Title is set for X Articles, the long-form posts that carry a headline and
+	// a body instead of the usual short text.
+	Title     string    `json:"title,omitempty"`
 	Text      string    `json:"text"`
 	URL       string    `json:"url"`
 	CreatedAt time.Time `json:"created_at,omitempty"`
@@ -69,7 +72,7 @@ func (p Post) Usable() bool {
 	if p.ID == "" || p.Author.Handle == "" {
 		return false
 	}
-	return strings.TrimSpace(p.Text) != "" || len(p.Media) > 0
+	return strings.TrimSpace(p.Text) != "" || strings.TrimSpace(p.Title) != "" || len(p.Media) > 0
 }
 
 // Dedupe returns the usable posts in input order with duplicate IDs removed,

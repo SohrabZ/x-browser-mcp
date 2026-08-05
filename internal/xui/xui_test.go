@@ -239,3 +239,35 @@ func TestSearchModeValidity(t *testing.T) {
 		t.Error("unknown modes must be rejected")
 	}
 }
+
+// X Articles are long-form posts. They render no tweetText at all -- the
+// headline and body live under their own testids -- so a reader that only
+// looked at tweetText returned an article as completely empty.
+func TestArticleConvertsWithTitleAndBody(t *testing.T) {
+	raw := RawPost{
+		Href:   "/Alfred_Lin/status/2084636778791858256",
+		Handle: "@Alfred_Lin",
+		Title:  "Speed Above All Else",
+		Text:   "If you read Heat Seeking Missile for Pain, you'll recall that...",
+	}
+
+	post, ok := raw.ToPost()
+	if !ok {
+		t.Fatal("an article must convert")
+	}
+	if post.Title != "Speed Above All Else" {
+		t.Errorf("title: got %q", post.Title)
+	}
+	if post.Text == "" {
+		t.Error("article body should be kept as the post text")
+	}
+}
+
+// A title alone is enough to keep a post, even with no body or media yet.
+func TestTitleAloneIsEnough(t *testing.T) {
+	raw := RawPost{Href: "/a/status/1", Handle: "@a", Title: "Headline"}
+
+	if _, ok := raw.ToPost(); !ok {
+		t.Fatal("a titled article carries content even with no body")
+	}
+}

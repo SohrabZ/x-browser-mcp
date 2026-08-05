@@ -307,6 +307,10 @@ func renderPosts(title string, res read.Result) string {
 // naming the images at least says something is there.
 func describe(p model.Post, maxRunes int) string {
 	text := model.Excerpt(p.Text, maxRunes)
+	if p.Title != "" {
+		// An article's headline is the most useful line about it, so it leads.
+		text = strings.TrimSpace(p.Title + " — " + text)
+	}
 	if len(p.Media) == 0 {
 		return text
 	}

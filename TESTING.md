@@ -99,7 +99,20 @@ Expect the root plus 10 replies, each carrying one entry in `media` and an empty
 Note that X's own reply counter shows `1` for that post — self-thread replies do
 not count toward it, so the counter is not a check on this.
 
-### 4. End-to-end check with an agent
+### 4. X Articles
+
+Long-form posts render nothing under `tweetText`; their headline and body live
+under their own testids, so this breaks separately from ordinary posts:
+
+```bash
+curl -s 'http://127.0.0.1:18110/api/v1/thread/Alfred_Lin/2084636778791858256?limit=3' \
+  | python3 -c 'import sys,json; r=json.load(sys.stdin)["root"]; print(r["title"], len(r["text"]))'
+```
+
+Expect a non-empty `title` and a body of a few thousand characters. An empty
+`text` means the article selectors have drifted.
+
+### 5. End-to-end check with an agent
 
 Connectivity first:
 
@@ -158,7 +171,7 @@ claude -p "Use the x-browser-mcp tools to read my X home timeline (5 posts). \
 - **A tool the client cannot see** — after adding a tool, clients discover it on
   a fresh session. Re-run `hermes mcp test` to confirm the count changed.
 
-### 5. Write gating
+### 6. Write gating
 
 ```bash
 ./x-browser-mcp -allow-writes

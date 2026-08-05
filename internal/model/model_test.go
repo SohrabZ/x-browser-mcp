@@ -135,3 +135,11 @@ func hasValidRunes(s string) bool {
 	}
 	return true
 }
+
+func TestTitledPostIsUsable(t *testing.T) {
+	p := Post{ID: "1", Author: Author{Handle: "a"}, Title: "An article"}
+
+	if !p.Usable() {
+		t.Fatal("an article with a title carries content")
+	}
+}
