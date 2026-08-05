@@ -402,17 +402,20 @@ func (p *Pool) Reserve(ctx context.Context) (Reservation, error) {
 		return nil, err
 	}
 
+	// Deciding the pool is open and taking its session must be one step. Close
+	// sets closed and takes the session in a single hold of the lock, so
+	// splitting them here lets a shutdown slip between: this would find the
+	// session already gone, report nothing left to close, and hand the profile
+	// to a login window while Close was still shutting that browser down.
+	//
+	// Taking it is also what makes the shutdown below this reservation's own --
+	// whoever removes the session closes it, and only one caller can.
 	p.mu.Lock()
-	closed := p.closed
-	p.mu.Unlock()
-	if closed {
+	if p.closed {
+		p.mu.Unlock()
 		p.releaseExclusive(done)
 		return nil, ErrClosed
 	}
-
-	// Close synchronously: the caller is about to put its own Chrome on this
-	// profile and cannot do that until ours has actually let go.
-	p.mu.Lock()
 	session := p.session
 	p.session = nil
 	p.mu.Unlock()

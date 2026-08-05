@@ -1230,3 +1230,27 @@ func TestGivingUpOnAWaitLeavesNoGoroutineBehind(t *testing.T) {
 		t.Fatalf("goroutines grew from %d to %d; waits that gave up are still parked", before, after)
 	}
 }
+
+// A reservation asked for after the pool has shut down is refused.
+//
+// This covers the refusal, not the race behind it. Reserve also rechecks in the
+// same breath as taking the session, because a shutdown landing between those
+// two steps would leave it reporting nothing left to close -- but that window is
+// a few instructions wide, and a race that cannot be staged is not a test.
+func TestReserveIsRefusedAfterShutdown(t *testing.T) {
+	open, _, _ := counting()
+	p := New(open, time.Minute)
+
+	lease, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	lease.Release()
+	p.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := p.Reserve(ctx); !errors.Is(err, ErrClosed) {
+		t.Fatalf("got %v, want ErrClosed", err)
+	}
+}
