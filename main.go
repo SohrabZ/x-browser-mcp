@@ -20,6 +20,7 @@ import (
 	"github.com/SohrabZ/x-browser-mcp/internal/httpapi"
 	"github.com/SohrabZ/x-browser-mcp/internal/limit"
 	"github.com/SohrabZ/x-browser-mcp/internal/mcpapi"
+	"github.com/SohrabZ/x-browser-mcp/internal/pool"
 	"github.com/SohrabZ/x-browser-mcp/internal/read"
 	"github.com/SohrabZ/x-browser-mcp/internal/write"
 	"github.com/SohrabZ/x-browser-mcp/internal/xui"
@@ -43,6 +44,7 @@ func run() error {
 	flag.BoolVar(&cfg.AllowWrites, "allow-writes", cfg.AllowWrites, "enable the write tools (post, reply, like, repost, bookmark)")
 	flag.DurationVar(&cfg.FetchTimeout, "fetch-timeout", cfg.FetchTimeout, "time budget for a single read")
 	flag.DurationVar(&cfg.LoginTimeout, "login-timeout", cfg.LoginTimeout, "how long an interactive login may stay open")
+	flag.DurationVar(&cfg.BrowserIdle, "browser-idle", cfg.BrowserIdle, "how long a browser stays warm between reads (0 disables warming)")
 
 	// Pacing is exposed because the right values depend on how hard you drive
 	// the server. Raising them raises the odds X flags the session.
@@ -73,16 +75,50 @@ func run() error {
 
 	open := browserOpener(cfg)
 
+	// One warm browser is shared by every read. Launching and quitting Chrome
+	// costs about 1.8s per read on its own, and a cold browser loads pages far
+	// more slowly, so reuse is worth roughly 3.2s of a 4.5s read.
+	//
+	// The browser is opened against a server-lifetime context, never the
+	// context of whichever request happened to warm it. rod ties a browser's
+	// life to the context it was built with, so using a request context here
+	// killed the shared browser the moment that first request returned and
+	// every later lease failed with "context canceled".
+	browserCtx, closeBrowsers := context.WithCancel(context.Background())
+	defer closeBrowsers()
+
+	browsers := pool.New(func(context.Context) (pool.Session, error) {
+		// The browser lives as long as the server, never as long as the request
+		// that happened to warm it. An impatient caller stops waiting; the pool
+		// keeps tracking the launch either way.
+		return browser.Open(browserCtx, browser.Options{
+			ChromePath:  cfg.ChromePath,
+			ProfileDir:  cfg.ProfileDir(),
+			ProfileName: cfg.ProfileName,
+			Headless:    cfg.Headless,
+		})
+	}, cfg.BrowserIdle)
+	defer browsers.Close()
+
+	lease := func(ctx context.Context) (*browser.Session, func(), error) {
+		l, err := browsers.Acquire(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return l.Session.(*browser.Session), l.Release, nil
+	}
+
 	authManager := auth.New(auth.Options{
 		ProfileDir:   cfg.ProfileDir(),
 		StatusTTL:    cfg.StatusTTL,
 		LoginTimeout: cfg.LoginTimeout,
-		Open:         open,
+		Lease:        lease,
+		Reserve:      browsers,
 		LaunchLogin:  loginLauncher(cfg),
 	})
 
 	reader := read.New(read.Options{
-		Open:     open,
+		Lease:    lease,
 		Auth:     authManager,
 		Budget:   limit.New(pace(cfg.ReadPace)),
 		CacheFor: cfg.ResultTTL,
@@ -99,7 +135,11 @@ func run() error {
 		Gate:    gate,
 		Budget:  limit.New(pace(cfg.WritePace)),
 		Audit:   write.NewAuditor(cfg.AuditLogPath()),
+		Reserve: browsers,
 		Timeout: cfg.FetchTimeout,
+
+		// A successful write changes what the next read should return.
+		OnChange: reader.Invalidate,
 	})
 
 	handler := httpapi.Handler(httpapi.Deps{
@@ -178,6 +218,15 @@ func browserOpener(cfg config.Config) func(context.Context, bool) (*browser.Sess
 // Chrome flushes cookies and releases the profile lock.
 func loginLauncher(cfg config.Config) func() (*exec.Cmd, error) {
 	return func() (*exec.Cmd, error) {
+		// Everything else reaches Chrome through browser.Open, which refuses a
+		// profile someone already owns. This path does not, so it makes the
+		// same check: a reservation coordinates callers, but the directory is
+		// what decides, and a second Chrome here would corrupt the very profile
+		// the user is signing in to.
+		if browser.InUse(cfg.ProfileDir()) {
+			return nil, fmt.Errorf("%w (%s)", browser.ErrProfileInUse, cfg.ProfileDir())
+		}
+
 		args := []string{
 			"--user-data-dir=" + cfg.ProfileDir(),
 			"--profile-directory=" + cfg.ProfileName,

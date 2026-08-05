@@ -6,11 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/SohrabZ/x-browser-mcp/internal/browser"
+	"github.com/SohrabZ/x-browser-mcp/internal/pool"
 	"github.com/SohrabZ/x-browser-mcp/internal/xui"
 )
 
@@ -34,8 +37,17 @@ type Status struct {
 	ProfileDir string    `json:"profile_dir"`
 }
 
-// Opener starts a browser session against the persistent profile.
-type Opener func(ctx context.Context, headless bool) (*browser.Session, error)
+// Lease borrows a browser session and returns a function that hands it back.
+type Lease func(ctx context.Context) (*browser.Session, func(), error)
+
+// Reserver takes exclusive use of the profile.
+//
+// Only one Chrome may hold a user-data-dir. The login window needs it for as
+// long as the user is signing in, so the reservation is held until that window
+// closes rather than released as soon as it opens.
+type Reserver interface {
+	Reserve(ctx context.Context) (pool.Reservation, error)
+}
 
 // LoginLauncher opens a visible browser for the user to sign in with. It
 // returns the running process so its exit can be observed.
@@ -47,7 +59,8 @@ type Options struct {
 	StatusTTL    time.Duration
 	LoginTimeout time.Duration
 
-	Open        Opener
+	Lease       Lease
+	Reserve     Reserver
 	LaunchLogin LoginLauncher
 }
 
@@ -72,6 +85,10 @@ type attempt struct {
 	cmd      *exec.Cmd
 	done     <-chan error
 	deadline time.Time
+
+	// profile is held for the whole sign-in, so no read can warm a browser on
+	// the profile while the login window has it.
+	profile pool.Reservation
 }
 
 // New builds a Manager.
@@ -116,11 +133,15 @@ func (m *Manager) Require(ctx context.Context) error {
 //
 // The login browser holds the profile lock, so probing during it would either
 // fail on the lock or race the user mid-sign-in.
+//
+// This tracks the window, not the deadline. A login that overran its timeout is
+// still a login: the window is open and still owns the profile, and reporting
+// otherwise would send reads at a directory Chrome is holding.
 func (m *Manager) loginInProgress() (Status, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.login == nil || !m.now().Before(m.login.deadline) {
+	if m.login == nil {
 		return Status{}, false
 	}
 	return Status{
@@ -171,7 +192,7 @@ func (m *Manager) probe(ctx context.Context) (Status, error) {
 		ProfileDir: m.opts.ProfileDir,
 	}
 
-	session, err := m.opts.Open(ctx, true)
+	session, release, err := m.opts.Lease(ctx)
 	if err != nil {
 		// A locked profile means someone else is using it, not that the session
 		// is gone; reporting "login required" would send the user into a
@@ -181,9 +202,9 @@ func (m *Manager) probe(ctx context.Context) (Status, error) {
 		}
 		return Status{}, err
 	}
-	defer session.Close()
+	defer release()
 
-	page, err := session.Page()
+	page, err := session.Page(ctx)
 	if err != nil {
 		return Status{}, err
 	}
@@ -231,28 +252,66 @@ func signedIn(session *browser.Session, page *browser.Page) (bool, error) {
 func (m *Manager) StartLogin(ctx context.Context) (time.Time, error) {
 	m.Invalidate()
 
+	// Claim the login before doing anything slow. Reserving the profile can
+	// take as long as a read, and a second caller that arrives during it would
+	// otherwise see no login in progress, queue behind the reservation, and
+	// open its own window once this one had finished -- a browser nobody asked
+	// for, holding the profile for another full timeout. The deadline is known
+	// up front, so there is nothing to wait for before publishing it.
+	att := &attempt{deadline: m.now().Add(m.opts.LoginTimeout)}
+
 	m.mu.Lock()
-	if m.login != nil && m.now().Before(m.login.deadline) {
+	if m.login != nil {
+		// A window is already open on this profile; a second one cannot have it.
 		deadline := m.login.deadline
 		m.mu.Unlock()
 		return deadline, nil
 	}
+	m.login = att
 	m.mu.Unlock()
+
+	// From here every failure has to give the claim back, or status reports a
+	// login in progress that will never finish.
+	launched := false
+	defer func() {
+		if launched {
+			return
+		}
+		m.mu.Lock()
+		if m.login == att {
+			m.login = nil
+		}
+		m.mu.Unlock()
+	}()
+
+	// Take the profile before opening the window, and keep it until the window
+	// closes. Releasing it early would let the next read start a second Chrome
+	// on the directory the user is signing in to.
+	var reservation pool.Reservation
+	if m.opts.Reserve != nil {
+		reserveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		got, err := m.opts.Reserve.Reserve(reserveCtx)
+		cancel()
+		if err != nil {
+			return time.Time{}, fmt.Errorf("reserve profile for login: %w", err)
+		}
+		reservation = got
+	}
 
 	cmd, err := m.opts.LaunchLogin()
 	if err != nil {
+		if reservation != nil {
+			reservation.Release()
+		}
 		return time.Time{}, fmt.Errorf("open login browser: %w", err)
 	}
 
-	att := &attempt{
-		cmd:      cmd,
-		done:     waitFor(cmd),
-		deadline: m.now().Add(m.opts.LoginTimeout),
-	}
-
 	m.mu.Lock()
-	m.login = att
+	att.cmd = cmd
+	att.done = waitFor(cmd)
+	att.profile = reservation
 	m.mu.Unlock()
+	launched = true
 
 	go m.watch(att)
 	return att.deadline, nil
@@ -270,6 +329,17 @@ func (m *Manager) watch(att *attempt) {
 	select {
 	case <-att.done:
 	case <-timer.C:
+		// The deadline is a bound on how long the profile may be unavailable,
+		// so it has to be enforced: an abandoned window would otherwise block
+		// every read and write for as long as it stayed open.
+		//
+		// Ownership is still not released on the timer alone -- Chrome holds
+		// the profile until it exits. The window is asked to quit, and the wait
+		// continues until it actually has.
+		slog.Warn("x login exceeded its timeout; closing the window",
+			"deadline", att.deadline, "timeout", m.opts.LoginTimeout)
+		closeLoginWindow(att)
+		<-att.done
 	}
 
 	m.mu.Lock()
@@ -278,10 +348,54 @@ func (m *Manager) watch(att *attempt) {
 	}
 	m.cached = nil
 	m.mu.Unlock()
+
+	// The window has actually exited, so reads may have the profile back.
+	if att.profile != nil {
+		att.profile.Release()
+	}
 }
 
+// graceWait is how long a login window gets to shut down cleanly before it is
+// killed outright.
+//
+// The signal matters: Chrome writes cookies and releases its profile lock on a
+// clean exit, so a sign-in the user just completed survives being asked to
+// quit. Killing without asking first would risk discarding it.
+const graceWait = 15 * time.Second
+
+// closeLoginWindow asks the login browser to quit, then insists.
+func closeLoginWindow(att *attempt) {
+	if att.cmd == nil || att.cmd.Process == nil {
+		return
+	}
+
+	if err := att.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		// Already gone, or not signallable; the wait below settles it either way.
+		return
+	}
+
+	select {
+	case <-att.done:
+		return
+	case <-time.After(graceWait):
+	}
+
+	slog.Warn("login window did not exit after being asked; killing it")
+	_ = att.cmd.Process.Kill()
+}
+
+// waitFor reports the login process exiting.
+//
+// The channel is closed after the result is sent, so more than one place can
+// wait on it: the deadline handler watches for the window to go away after
+// asking it to quit, and the watcher waits for the same thing before releasing
+// the profile. A plain send would let the first receiver swallow the only
+// value and leave the second blocked forever.
 func waitFor(cmd *exec.Cmd) <-chan error {
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	go func() {
+		done <- cmd.Wait()
+		close(done)
+	}()
 	return done
 }

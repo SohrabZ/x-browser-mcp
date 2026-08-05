@@ -37,6 +37,10 @@ type Config struct {
 
 	FetchTimeout time.Duration
 	LoginTimeout time.Duration
+
+	// BrowserIdle is how long a browser stays warm with no reads before it is
+	// closed. Zero disables warming, opening a browser per read.
+	BrowserIdle time.Duration
 }
 
 // Pace describes how often an operation may touch X: a floor between calls and
@@ -93,6 +97,10 @@ func Default() Config {
 
 		FetchTimeout: 45 * time.Second,
 		LoginTimeout: 5 * time.Minute,
+
+		// Long enough that a conversation's reads share one browser, short
+		// enough that an idle machine is not holding Chrome all day.
+		BrowserIdle: 3 * time.Minute,
 	}
 }
 

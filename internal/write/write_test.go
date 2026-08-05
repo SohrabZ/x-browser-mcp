@@ -4,10 +4,14 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // A disabled gate must refuse everything, whatever token is offered. This is
@@ -214,3 +218,60 @@ func TestNilAuditorIsSafe(t *testing.T) {
 		t.Fatalf("a nil auditor should be a no-op, got %v", err)
 	}
 }
+
+// A write browser that would not confirm its exit keeps the profile. Handing it
+// back would put the next read's Chrome on a directory the write browser may
+// still own -- and the session cannot answer the question, because Close has
+// already torn its connection down. The profile itself is asked instead.
+func TestAnUnconfirmedWriteShutdownHoldsTheProfile(t *testing.T) {
+	dir := t.TempDir()
+
+	// A live process holding the lock stands in for the browser that would not go.
+	holder := exec.Command("sleep", "60")
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Process.Kill() })
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("hostname: %v", err)
+	}
+	if err := os.Symlink(fmt.Sprintf("%s-%d", host, holder.Process.Pid), filepath.Join(dir, "SingletonLock")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	res := &recordingReservation{}
+	holdUntilFree(errors.New("chrome did not exit"), dir, res)
+
+	time.Sleep(300 * time.Millisecond)
+	if res.released.Load() {
+		t.Fatal("the profile was handed back while a process still held it")
+	}
+
+	// Once the holder is gone, the profile is released without further prompting.
+	_ = holder.Process.Kill()
+	_ = holder.Wait()
+
+	deadline := time.After(5 * time.Second)
+	for !res.released.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("the profile was never released after its holder exited")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// A confirmed shutdown hands the profile straight back; the hold is for doubt,
+// not for every write.
+func TestAConfirmedWriteShutdownReleasesImmediately(t *testing.T) {
+	res := &recordingReservation{}
+	holdUntilFree(nil, t.TempDir(), res)
+	if !res.released.Load() {
+		t.Fatal("a confirmed shutdown should release the profile at once")
+	}
+}
+
+type recordingReservation struct{ released atomic.Bool }
+
+func (r *recordingReservation) Release() { r.released.Store(true) }

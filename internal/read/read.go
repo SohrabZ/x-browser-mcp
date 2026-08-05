@@ -59,12 +59,16 @@ func ClampLimit(n int) int {
 	return n
 }
 
-// Opener starts a browser session against the persistent profile.
-type Opener func(ctx context.Context, headless bool) (*browser.Session, error)
+// Lease borrows a browser session and returns a function that hands it back.
+//
+// Reads borrow rather than open so a warm browser can be shared between them:
+// launching and quitting Chrome costs about 1.8s per read on its own, before
+// the slower cold page loads.
+type Lease func(ctx context.Context) (*browser.Session, func(), error)
 
 // Reader reads X through a browser.
 type Reader struct {
-	open   Opener
+	lease  Lease
 	auth   *auth.Manager
 	budget *limit.Budget
 	cache  *cache
@@ -74,7 +78,7 @@ type Reader struct {
 
 // Options configures a Reader.
 type Options struct {
-	Open     Opener
+	Lease    Lease
 	Auth     *auth.Manager
 	Budget   *limit.Budget
 	CacheFor time.Duration
@@ -84,7 +88,7 @@ type Options struct {
 // New builds a Reader.
 func New(opts Options) *Reader {
 	return &Reader{
-		open:    opts.Open,
+		lease:   opts.Lease,
 		auth:    opts.Auth,
 		budget:  opts.Budget,
 		cache:   newCache(opts.CacheFor),
@@ -93,6 +97,15 @@ func New(opts Options) *Reader {
 }
 
 // Home reads the signed-in home timeline.
+// Invalidate drops every cached result.
+//
+// A write changes what the next read should return -- a new post belongs in the
+// timeline, a like belongs on the post -- and serving the pre-write copy for
+// the rest of the TTL makes the write look like it did not happen.
+func (r *Reader) Invalidate() {
+	r.cache.Invalidate()
+}
+
 func (r *Reader) Home(ctx context.Context, n int) (Result, error) {
 	n = ClampLimit(n)
 	return r.timeline(ctx, cacheKey("home", n), xui.HomeURL, n)
@@ -228,13 +241,13 @@ func (r *Reader) timeline(ctx context.Context, key, url string, n int) (Result, 
 // collect opens the page and scrolls until it has enough posts or the timeline
 // stops yielding new ones.
 func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, error) {
-	session, err := r.open(ctx, true)
+	session, release, err := r.lease(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer session.Close()
+	defer release()
 
-	page, err := session.Page()
+	page, err := session.Page(ctx)
 	if err != nil {
 		return nil, err
 	}

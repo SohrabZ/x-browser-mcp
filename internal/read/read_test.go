@@ -120,3 +120,21 @@ func TestConcurrentCacheAccessIsSafe(t *testing.T) {
 		<-done
 	}
 }
+
+// A write changes what the next read should return, so the reader exposes a way
+// to drop what it has. The cache had this from the start; the reader did not,
+// which meant nothing could actually call it.
+func TestReaderInvalidateDropsCachedResults(t *testing.T) {
+	r := New(Options{CacheFor: time.Hour})
+
+	r.cache.put("home:20", Result{Posts: []model.Post{{ID: "1", Text: "before"}}})
+	if _, ok := r.cache.get("home:20"); !ok {
+		t.Fatal("expected the result to be cached")
+	}
+
+	r.Invalidate()
+
+	if _, ok := r.cache.get("home:20"); ok {
+		t.Fatal("a write invalidated the cache; the stale result is still being served")
+	}
+}
