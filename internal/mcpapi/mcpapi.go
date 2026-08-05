@@ -4,6 +4,7 @@ package mcpapi
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/SohrabZ/x-browser-mcp/internal/auth"
+	"github.com/SohrabZ/x-browser-mcp/internal/fault"
 	"github.com/SohrabZ/x-browser-mcp/internal/model"
 	"github.com/SohrabZ/x-browser-mcp/internal/read"
 	"github.com/SohrabZ/x-browser-mcp/internal/write"
@@ -22,6 +24,10 @@ type Deps struct {
 	Auth   *auth.Manager
 	Reader *read.Reader
 	Writer write.Actions
+
+	// Log is where the detail of a failure goes when the model is told only that
+	// there was one.
+	Log *slog.Logger
 }
 
 // Server builds an MCP server exposing the read tools, plus the write tools
@@ -82,7 +88,7 @@ func registerRead(s *mcp.Server, deps Deps) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ statusIn) (*mcp.CallToolResult, auth.Status, error) {
 		status, err := deps.Auth.Status(ctx)
 		if err != nil {
-			return errorResult(err), auth.Status{}, nil
+			return errorResult(deps.Log, err), auth.Status{}, nil
 		}
 		return textResult(fmt.Sprintf("X session: %s", status.State)), status, nil
 	})
@@ -96,7 +102,7 @@ func registerRead(s *mcp.Server, deps Deps) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ startIn) (*mcp.CallToolResult, startOut, error) {
 		deadline, err := deps.Auth.StartLogin(ctx)
 		if err != nil {
-			return errorResult(err), startOut{}, nil
+			return errorResult(deps.Log, err), startOut{}, nil
 		}
 		out := startOut{Deadline: deadline.UTC()}
 		return textResult("A browser window is open. Sign in, then fully quit the window (Cmd-Q)."), out, nil
@@ -111,7 +117,7 @@ func registerRead(s *mcp.Server, deps Deps) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in homeIn) (*mcp.CallToolResult, read.Result, error) {
 		res, err := deps.Reader.Home(ctx, in.Limit)
 		if err != nil {
-			return errorResult(err), read.Result{}, nil
+			return errorResult(deps.Log, err), read.Result{}, nil
 		}
 		return textResult(renderPosts("Home timeline", res)), res, nil
 	})
@@ -132,7 +138,7 @@ func registerRead(s *mcp.Server, deps Deps) {
 			Limit: in.Limit,
 		})
 		if err != nil {
-			return errorResult(err), read.Result{}, nil
+			return errorResult(deps.Log, err), read.Result{}, nil
 		}
 		return textResult(renderPosts("Search: "+in.Query, res)), res, nil
 	})
@@ -147,7 +153,7 @@ func registerRead(s *mcp.Server, deps Deps) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in userIn) (*mcp.CallToolResult, read.Result, error) {
 		res, err := deps.Reader.UserPosts(ctx, in.Handle, in.Limit)
 		if err != nil {
-			return errorResult(err), read.Result{}, nil
+			return errorResult(deps.Log, err), read.Result{}, nil
 		}
 		return textResult(renderPosts("@"+xui.NormalizeHandle(in.Handle), res)), res, nil
 	})
@@ -163,7 +169,7 @@ func registerRead(s *mcp.Server, deps Deps) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in threadIn) (*mcp.CallToolResult, model.Thread, error) {
 		thread, err := deps.Reader.Thread(ctx, in.Handle, in.PostID, in.Limit)
 		if err != nil {
-			return errorResult(err), model.Thread{}, nil
+			return errorResult(deps.Log, err), model.Thread{}, nil
 		}
 		return textResult(renderThread(thread)), thread, nil
 	})
@@ -181,7 +187,7 @@ func registerRead(s *mcp.Server, deps Deps) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in urlIn) (*mcp.CallToolResult, urlOut, error) {
 		res, thread, err := deps.Reader.FromURL(ctx, in.URL, in.Limit)
 		if err != nil {
-			return errorResult(err), urlOut{}, nil
+			return errorResult(deps.Log, err), urlOut{}, nil
 		}
 		if thread.Root.ID != "" {
 			return textResult(renderThread(thread)), urlOut{Kind: "thread", Thread: &thread}, nil
@@ -198,7 +204,7 @@ func registerRead(s *mcp.Server, deps Deps) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in bookmarksIn) (*mcp.CallToolResult, read.Result, error) {
 		res, err := deps.Reader.Bookmarks(ctx, in.Limit)
 		if err != nil {
-			return errorResult(err), read.Result{}, nil
+			return errorResult(deps.Log, err), read.Result{}, nil
 		}
 		return textResult(renderPosts("Bookmarks", res)), res, nil
 	})
@@ -213,7 +219,7 @@ func registerRead(s *mcp.Server, deps Deps) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in listIn) (*mcp.CallToolResult, read.Result, error) {
 		res, err := deps.Reader.List(ctx, in.ListID, in.Limit)
 		if err != nil {
-			return errorResult(err), read.Result{}, nil
+			return errorResult(deps.Log, err), read.Result{}, nil
 		}
 		return textResult(renderPosts("List "+in.ListID, res)), res, nil
 	})
@@ -234,7 +240,7 @@ func registerWrite(s *mcp.Server, deps Deps) {
 		Description: "Publish a new post to X as the signed-in user." + confirmNote,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in postIn) (*mcp.CallToolResult, actionOut, error) {
 		if err := deps.Writer.Post(ctx, in.Text, in.Confirm); err != nil {
-			return errorResult(err), actionOut{}, nil
+			return errorResult(deps.Log, err), actionOut{}, nil
 		}
 		return textResult("Posted."), actionOut{OK: true, Action: write.ActionPost}, nil
 	})
@@ -250,7 +256,7 @@ func registerWrite(s *mcp.Server, deps Deps) {
 		Description: "Reply to an X post as the signed-in user." + confirmNote,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in replyIn) (*mcp.CallToolResult, actionOut, error) {
 		if err := deps.Writer.Reply(ctx, in.Handle, in.PostID, in.Text, in.Confirm); err != nil {
-			return errorResult(err), actionOut{}, nil
+			return errorResult(deps.Log, err), actionOut{}, nil
 		}
 		return textResult("Replied."), actionOut{OK: true, Action: write.ActionReply}, nil
 	})
@@ -266,7 +272,7 @@ func registerWrite(s *mcp.Server, deps Deps) {
 		Description: "Like an X post as the signed-in user." + confirmNote,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in targetIn) (*mcp.CallToolResult, actionOut, error) {
 		if err := deps.Writer.Like(ctx, in.Handle, in.PostID, in.Confirm); err != nil {
-			return errorResult(err), actionOut{}, nil
+			return errorResult(deps.Log, err), actionOut{}, nil
 		}
 		return textResult("Liked."), actionOut{OK: true, Action: write.ActionLike}, nil
 	})
@@ -276,7 +282,7 @@ func registerWrite(s *mcp.Server, deps Deps) {
 		Description: "Repost an X post as the signed-in user." + confirmNote,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in targetIn) (*mcp.CallToolResult, actionOut, error) {
 		if err := deps.Writer.Repost(ctx, in.Handle, in.PostID, in.Confirm); err != nil {
-			return errorResult(err), actionOut{}, nil
+			return errorResult(deps.Log, err), actionOut{}, nil
 		}
 		return textResult("Reposted."), actionOut{OK: true, Action: write.ActionRepost}, nil
 	})
@@ -286,7 +292,7 @@ func registerWrite(s *mcp.Server, deps Deps) {
 		Description: "Save an X post to the signed-in user's bookmarks." + confirmNote,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in targetIn) (*mcp.CallToolResult, actionOut, error) {
 		if err := deps.Writer.Bookmark(ctx, in.Handle, in.PostID, in.Confirm); err != nil {
-			return errorResult(err), actionOut{}, nil
+			return errorResult(deps.Log, err), actionOut{}, nil
 		}
 		return textResult("Bookmarked."), actionOut{OK: true, Action: write.ActionBookmark}, nil
 	})
@@ -296,7 +302,7 @@ func registerWrite(s *mcp.Server, deps Deps) {
 		Description: "Remove an X post from the signed-in user's bookmarks." + confirmNote,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in targetIn) (*mcp.CallToolResult, actionOut, error) {
 		if err := deps.Writer.Unbookmark(ctx, in.Handle, in.PostID, in.Confirm); err != nil {
-			return errorResult(err), actionOut{}, nil
+			return errorResult(deps.Log, err), actionOut{}, nil
 		}
 		return textResult("Removed from bookmarks."), actionOut{OK: true, Action: write.ActionUnbookmark}, nil
 	})
@@ -386,9 +392,23 @@ func textResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
 }
 
-func errorResult(err error) *mcp.CallToolResult {
+// errorResult reports a failure to the model.
+//
+// What it may say is decided in one place for both transports. A model is not a
+// safer audience than an HTTP client for this: whatever reaches it enters the same
+// context as untrusted post text, and may be sent on to wherever that model runs.
+// A profile already in use arrives wrapped around the path of its lock, and that
+// path is not the model's to have.
+//
+// A failure with no classification says only that there was one. Its detail goes
+// to the log, so an operator watching X's markup drift still sees what broke.
+func errorResult(log *slog.Logger, err error) *mcp.CallToolResult {
+	kind, message := fault.Describe(err)
+	if kind == fault.Internal && log != nil {
+		log.Error("tool failed", "err", err)
+	}
 	return &mcp.CallToolResult{
 		IsError: true,
-		Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+		Content: []mcp.Content{&mcp.TextContent{Text: message}},
 	}
 }

@@ -6,7 +6,6 @@ package write
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -179,7 +178,7 @@ func (w *Writer) Repost(ctx context.Context, handle, postID, confirm string) err
 			return err
 		}
 		if !hasOnPost(p, postID, xui.SelUnrepostButton, engagementWait) {
-			return errors.New("repost did not take effect: X never showed it as applied")
+			return notApplied("repost did not take effect: X never showed it as applied")
 		}
 		settled()
 
@@ -232,7 +231,7 @@ func (w *Writer) tap(ctx context.Context, action, handle, postID, confirm, butto
 		// is torn down immediately after this returns, which is enough to lose
 		// a request still in flight. Wait for the control to flip.
 		if !hasOnPost(p, postID, alreadyDone, engagementWait) {
-			return fmt.Errorf("%s did not take effect: X never showed it as applied", action)
+			return notApplied("%s did not take effect: X never showed it as applied", action)
 		}
 		// The control flipping is not the action either. X updates it
 		// optimistically, before its request has completed, so anything that
@@ -271,7 +270,7 @@ func confirmApplied(p *browser.Page, target, postID, alreadyDone, action string)
 		return fmt.Errorf("confirm %s: %w", action, err)
 	}
 	if !hasOnPost(p, postID, alreadyDone, engagementWait) {
-		return fmt.Errorf("%s did not stick: X did not show it as applied after reloading the post", action)
+		return notApplied("%s did not stick: X did not show it as applied after reloading the post", action)
 	}
 	return nil
 }
@@ -452,6 +451,26 @@ func (w *Writer) fail(rec Record, err error) error {
 	return err
 }
 
+// NotFoundError marks a post X did not render. Liking a deleted or private post
+// is not a fault of this server's, and the caller needs to know the target is
+// gone rather than be told to try again.
+type NotFoundError struct{ Reason string }
+
+func (e *NotFoundError) Error() string { return e.Reason }
+
+// NotAppliedError marks an action that was carried out and that X did not apply.
+//
+// Distinct from a fault: the machinery worked, so what it says is an answer the
+// caller can act on rather than a detail of this process. It says only what X
+// showed, and carries nothing else.
+type NotAppliedError struct{ Reason string }
+
+func (e *NotAppliedError) Error() string { return e.Reason }
+
+func notApplied(format string, a ...any) error {
+	return &NotAppliedError{Reason: fmt.Sprintf(format, a...)}
+}
+
 // InvalidError marks a request the caller got wrong, as distinct from a write
 // that was attempted and did not take effect. The two deserve different
 // answers: one is worth correcting and sending again, the other is not.
@@ -590,8 +609,15 @@ func pressOnPost(p *browser.Page, postID, selector string, budget time.Duration)
 		}
 		if time.Now().After(deadline) {
 			if state == noPost {
-				return fmt.Errorf("press %s: X rendered no post to press it on", selector)
+				// The address loaded and X put no post on it. That is the
+				// caller's answer, not a fault: the post is deleted, private, or
+				// the id is wrong. The selector is no part of it.
+				return &NotFoundError{Reason: "no post at that address; it may be deleted, private, or the id may be wrong"}
 			}
+			// The post is there and the control is not, which is either X
+			// withholding it or this server's selectors having drifted. Those are
+			// not distinguishable from here, and one of them is a fault, so this
+			// stays unclassified and goes to the log.
 			return fmt.Errorf("press %s: the post does not offer that control", selector)
 		}
 		time.Sleep(pollInterval)

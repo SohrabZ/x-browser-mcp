@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/SohrabZ/x-browser-mcp/internal/browser"
 	"github.com/SohrabZ/x-browser-mcp/internal/model"
 	"github.com/SohrabZ/x-browser-mcp/internal/read"
 	"github.com/SohrabZ/x-browser-mcp/internal/write"
@@ -271,13 +273,65 @@ func TestRenderedPostsTruncateLongText(t *testing.T) {
 }
 
 func TestErrorResultIsMarkedAsAnError(t *testing.T) {
-	res := errorResult(context.DeadlineExceeded)
+	res := errorResult(nil, context.DeadlineExceeded)
 
 	if !res.IsError {
 		t.Error("error results must set IsError so the client can tell")
 	}
 	if len(res.Content) == 0 {
 		t.Fatal("error results should carry a message")
+	}
+}
+
+// A model is not a safer audience for a filesystem path than an HTTP client:
+// whatever reaches it enters the same context as untrusted post text, and may be
+// sent on to wherever that model runs.
+func TestAToolFailureDoesNotHandTheModelAPath(t *testing.T) {
+	secret := "/Users/someone/.x-browser-mcp/profile/SingletonLock"
+
+	for _, err := range []error{
+		fmt.Errorf("%w (%s)", browser.ErrProfileInUse, secret),
+		fmt.Errorf("open %s: %w", secret, errors.New("permission denied")),
+		errors.New("read " + secret + ": no such file"),
+	} {
+		got := textOf(t, errorResult(nil, err))
+		if strings.Contains(got, secret) {
+			t.Errorf("the model was told %q", got)
+		}
+	}
+}
+
+// Hiding an unrecognised failure must not hide it from the operator too, or a
+// change in X's markup becomes undebuggable.
+func TestAnUnrecognisedToolFailureIsLogged(t *testing.T) {
+	var logged strings.Builder
+	log := slog.New(slog.NewTextHandler(&logged, nil))
+
+	errorResult(log, errors.New("compose box not found"))
+
+	if !strings.Contains(logged.String(), "compose box not found") {
+		t.Errorf("the detail did not reach the log: %s", logged.String())
+	}
+}
+
+// A failure the caller can act on still says what it was, or the write
+// verification this server exists for reports nothing useful.
+func TestAWriteThatXDidNotApplyStillSaysSo(t *testing.T) {
+	got := textOf(t, errorResult(nil, &write.NotAppliedError{Reason: "like did not stick"}))
+
+	if got != "like did not stick" {
+		t.Errorf("the model was told %q, want the reason", got)
+	}
+}
+
+// And a post that is not there says that, rather than sending the model to retry
+// an action against something deleted.
+func TestAMissingPostSaysSoRatherThanFailing(t *testing.T) {
+	reason := "no post at that address; it may be deleted, private, or the id may be wrong"
+	got := textOf(t, errorResult(nil, &write.NotFoundError{Reason: reason}))
+
+	if got != reason {
+		t.Errorf("the model was told %q, want %q", got, reason)
 	}
 }
 
@@ -411,7 +465,7 @@ func TestEachWriteToolCallsItsOwnAction(t *testing.T) {
 // A refused or failed write has to come back as an error the model can see,
 // not as a success with an apology in the text.
 func TestAFailedWriteToolReportsAnError(t *testing.T) {
-	writer := &fakeActions{err: errors.New("like did not stick")}
+	writer := &fakeActions{err: &write.NotAppliedError{Reason: "like did not stick"}}
 	res := callTool(t, Deps{Writer: writer},
 		"like_post", map[string]any{"handle": "someone", "post_id": "222", "confirm": "tok"})
 

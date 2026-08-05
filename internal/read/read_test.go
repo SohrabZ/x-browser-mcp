@@ -3,6 +3,7 @@ package read
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,5 +172,54 @@ func TestAReadThatBrokeIsNotReportedAsEmpty(t *testing.T) {
 		if c.wantErr != nil && !errors.Is(got, c.wantErr) {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.wantErr)
 		}
+	}
+}
+
+// Callers paste links, so a link this cannot read is the most likely mistake
+// they will make and the one most worth being told about. Every way ParseURL
+// fails is the URL being wrong, and an unclassified error would reach them as
+// "internal error" -- which is what this whole classification exists to stop.
+func TestABadURLIsTheCallersMistakeNotAFault(t *testing.T) {
+	r := New(Options{})
+
+	for _, raw := range []string{
+		"",
+		"not a url at all",
+		"https://example.com/someone/status/222",
+		"https://x.com/search",      // no q
+		"https://x.com/i/lists/",    // no list id
+		"https://x.com/i/somewhere", // an /i/ route this cannot read
+		"https://x.com/settings",    // a reserved path that is not a timeline
+	} {
+		_, _, err := r.FromURL(context.Background(), raw, 5)
+		if err == nil {
+			t.Errorf("%q was accepted", raw)
+			continue
+		}
+
+		var badInput *InvalidError
+		if !errors.As(err, &badInput) {
+			t.Errorf("%q: got %T (%v), want an InvalidError", raw, err, err)
+			continue
+		}
+		// And it still says which URL, because that is the caller's own input.
+		if raw != "" && !strings.Contains(err.Error(), raw) {
+			t.Errorf("%q: message %q does not name the URL", raw, err)
+		}
+	}
+}
+
+// One of the readers of these messages is a model, so quoting a caller's input
+// back has to be bounded: an unbounded message is a way to fill a context window
+// with one bad request.
+func TestAnEnormousURLIsNotQuotedBackWhole(t *testing.T) {
+	huge := "https://example.com/" + strings.Repeat("a", 20000) // not an x.com URL
+
+	_, _, err := New(Options{}).FromURL(context.Background(), huge, 5)
+	if err == nil {
+		t.Fatal("a 20k URL was accepted")
+	}
+	if n := len(err.Error()); n > maxMessage+len("...") {
+		t.Errorf("the message is %d chars; it should be bounded at %d", n, maxMessage)
 	}
 }

@@ -59,6 +59,21 @@ type NotFoundError struct{ Reason string }
 
 func (e *NotFoundError) Error() string { return e.Reason }
 
+// shorten bounds how much of a caller's own input is quoted back at them.
+//
+// These messages name the URL that was rejected, which is what makes them useful,
+// and the URL came from the caller. But one of the readers is a model, and an
+// unbounded message is a way to fill its context with a single bad request.
+func shorten(message string) string {
+	if len(message) <= maxMessage {
+		return message
+	}
+	return message[:maxMessage] + "..."
+}
+
+// maxMessage is generous for any real x.com URL and far short of a nuisance.
+const maxMessage = 300
+
 func invalid(format string, a ...any) error {
 	return &InvalidError{Reason: fmt.Sprintf(format, a...)}
 }
@@ -177,7 +192,11 @@ func (r *Reader) List(ctx context.Context, listID string, n int) (Result, error)
 func (r *Reader) FromURL(ctx context.Context, raw string, n int) (Result, model.Thread, error) {
 	target, err := xui.ParseURL(raw)
 	if err != nil {
-		return Result{}, model.Thread{}, err
+		// Every way this fails is the caller's URL being wrong -- not an x.com
+		// link, no post id in it, a search with no query. Saying so is the whole
+		// use of this entry point, since callers paste links rather than assemble
+		// handle and id pairs, and an unclassified error would say nothing at all.
+		return Result{}, model.Thread{}, invalid("%s", shorten(err.Error()))
 	}
 
 	switch target.Kind {

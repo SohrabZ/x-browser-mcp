@@ -4,7 +4,6 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -15,9 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/SohrabZ/x-browser-mcp/internal/auth"
-	"github.com/SohrabZ/x-browser-mcp/internal/browser"
-	"github.com/SohrabZ/x-browser-mcp/internal/limit"
-	"github.com/SohrabZ/x-browser-mcp/internal/pool"
+	"github.com/SohrabZ/x-browser-mcp/internal/fault"
 	"github.com/SohrabZ/x-browser-mcp/internal/read"
 	"github.com/SohrabZ/x-browser-mcp/internal/write"
 	"github.com/SohrabZ/x-browser-mcp/internal/xui"
@@ -269,37 +266,21 @@ type errorBody struct {
 // respondWrite reports a write's outcome.
 //
 // Why a write failed is the useful part of the answer -- "like did not stick" is
-// what the caller has to act on -- so it is passed through rather than replaced
-// with the generic message a read gets. These are the strings the MCP tools
-// already return and they carry no internals.
-//
-// The status separates whose problem it is: a refusal or a malformed request is
-// the caller's, and a write that was attempted and did not take effect is X's.
+// what the caller has to act on -- so a failure that was recognised says what it
+// was. One that was not is a fault of this process, and is no more the caller's
+// to read here than on a read: a write reaches the browser, so it can come back
+// carrying the path of a profile lock.
 func respondWrite(w http.ResponseWriter, log *slog.Logger, action string, err error) {
 	if err == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": action})
 		return
 	}
 
-	status := http.StatusBadGateway
-	var (
-		exhausted *limit.ExhaustedError
-		badInput  *write.InvalidError
-	)
-	switch {
-	case errors.Is(err, write.ErrDisabled), errors.Is(err, write.ErrBadConfirmation):
-		status = http.StatusForbidden
-	case errors.Is(err, auth.ErrLoginRequired):
-		status = http.StatusPreconditionFailed
-	case errors.As(err, &exhausted):
-		status = http.StatusTooManyRequests
-	case errors.As(err, &badInput):
-		status = http.StatusBadRequest
-	}
-	if log != nil && status == http.StatusBadGateway {
+	kind, message := fault.Describe(err)
+	if kind == fault.Internal && log != nil {
 		log.Error("write failed", "action", action, "err", err)
 	}
-	writeJSON(w, status, errorBody{Error: err.Error()})
+	writeJSON(w, statusFor(kind), errorBody{Error: message})
 }
 
 func respond(w http.ResponseWriter, log *slog.Logger, res read.Result, err error) {
@@ -310,49 +291,45 @@ func respond(w http.ResponseWriter, log *slog.Logger, res read.Result, err error
 	writeJSON(w, http.StatusOK, res)
 }
 
-// writeErr maps errors to status codes and keeps internals out of the response.
+// writeErr answers a failed read.
 //
-// Only a fault the caller can do nothing about is hidden. Everything a caller
-// could act on says what it was: a list id that does not exist is not a server
-// error, and reporting it as one leaves them re-sending a request that will never
-// work.
+// What may be said about a failure, and what has to stay in this process, is
+// decided in one place for both transports; this turns that into a status. Only a
+// fault the caller can do nothing about is hidden, and its detail goes to the log
+// instead -- a list id that does not exist is not a server error, and reporting it
+// as one leaves them re-sending a request that will never work.
 func writeErr(w http.ResponseWriter, log *slog.Logger, err error) {
-	status := http.StatusInternalServerError
-	message := "internal error"
-
-	// What goes back is the message of the error that was recognised, never the
-	// one it arrived wrapped in. A wrapper is where the internals are: a profile
-	// already in use carries the path of the lock that says so.
-	var (
-		exhausted *limit.ExhaustedError
-		badInput  *read.InvalidError
-		missing   *read.NotFoundError
-	)
-	switch {
-	case errors.Is(err, auth.ErrLoginRequired):
-		status, message = http.StatusPreconditionFailed, auth.ErrLoginRequired.Error()
-	case errors.As(err, &exhausted):
-		status, message = http.StatusTooManyRequests, exhausted.Error()
-	case errors.As(err, &badInput):
-		status, message = http.StatusBadRequest, badInput.Error()
-	case errors.As(err, &missing):
-		status, message = http.StatusNotFound, missing.Error()
-	case errors.Is(err, browser.ErrProfileInUse):
-		// Temporary and self-explanatory: a login or a write holds the profile.
-		// Worth saying, and worth retrying.
-		status, message = http.StatusServiceUnavailable, browser.ErrProfileInUse.Error()
-	case errors.Is(err, pool.ErrClosed):
-		status, message = http.StatusServiceUnavailable, pool.ErrClosed.Error()
-	case errors.Is(err, context.DeadlineExceeded):
-		status, message = http.StatusGatewayTimeout, "the read did not finish in time"
-	default:
-		// Internal errors can carry filesystem paths and profile locations, so
-		// the detail goes to the log and the caller gets a generic message.
-		if log != nil {
-			log.Error("request failed", "err", err)
-		}
+	kind, message := fault.Describe(err)
+	if kind == fault.Internal && log != nil {
+		log.Error("request failed", "err", err)
 	}
-	writeJSON(w, status, errorBody{Error: message})
+	writeJSON(w, statusFor(kind), errorBody{Error: message})
+}
+
+// statusFor is this transport's vocabulary for a kind of failure.
+func statusFor(kind fault.Kind) int {
+	switch kind {
+	case fault.Invalid:
+		return http.StatusBadRequest
+	case fault.Missing:
+		return http.StatusNotFound
+	case fault.Refused:
+		return http.StatusForbidden
+	case fault.LoginRequired:
+		return http.StatusPreconditionFailed
+	case fault.Paced:
+		return http.StatusTooManyRequests
+	case fault.Busy:
+		return http.StatusServiceUnavailable
+	case fault.Timeout:
+		return http.StatusGatewayTimeout
+	case fault.NotApplied:
+		// The request was carried out and X did not apply it, which is a failure
+		// upstream of here rather than a fault of this server's.
+		return http.StatusBadGateway
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
