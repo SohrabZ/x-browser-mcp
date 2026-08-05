@@ -4,7 +4,6 @@ package read
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -47,6 +46,26 @@ const (
 	// has decided not to render, it only makes every short page slow.
 	stallRounds = 3
 )
+
+// InvalidError marks a request the caller got wrong -- a missing handle, a URL
+// this cannot read. It is not a server fault and repeating it will not help.
+type InvalidError struct{ Reason string }
+
+func (e *InvalidError) Error() string { return e.Reason }
+
+// NotFoundError marks a surface X had nothing on. A list id that does not exist
+// is the caller asking for something absent, not the server failing.
+type NotFoundError struct{ Reason string }
+
+func (e *NotFoundError) Error() string { return e.Reason }
+
+func invalid(format string, a ...any) error {
+	return &InvalidError{Reason: fmt.Sprintf(format, a...)}
+}
+
+func notFound(format string, a ...any) error {
+	return &NotFoundError{Reason: fmt.Sprintf(format, a...)}
+}
 
 // ClampLimit brings a caller-supplied limit into range.
 func ClampLimit(n int) int {
@@ -114,7 +133,7 @@ func (r *Reader) Home(ctx context.Context, n int) (Result, error) {
 // Search reads recent posts matching a query.
 func (r *Reader) Search(ctx context.Context, q Query) (Result, error) {
 	if q.Text == "" {
-		return Result{}, errors.New("search query is required")
+		return Result{}, invalid("search query is required")
 	}
 	if !q.Mode.Valid() {
 		q.Mode = xui.Latest
@@ -129,7 +148,7 @@ func (r *Reader) Search(ctx context.Context, q Query) (Result, error) {
 func (r *Reader) UserPosts(ctx context.Context, handle string, n int) (Result, error) {
 	h := xui.NormalizeHandle(handle)
 	if h == "" {
-		return Result{}, errors.New("handle is required")
+		return Result{}, invalid("handle is required")
 	}
 	n = ClampLimit(n)
 	return r.timeline(ctx, cacheKey("user|"+h, n), xui.UserURL(h), n)
@@ -144,7 +163,7 @@ func (r *Reader) Bookmarks(ctx context.Context, n int) (Result, error) {
 // List reads a curated list's timeline.
 func (r *Reader) List(ctx context.Context, listID string, n int) (Result, error) {
 	if listID == "" {
-		return Result{}, errors.New("list id is required")
+		return Result{}, invalid("list id is required")
 	}
 	n = ClampLimit(n)
 	return r.timeline(ctx, cacheKey("list|"+listID, n), xui.ListURL(listID), n)
@@ -181,7 +200,7 @@ func (r *Reader) FromURL(ctx context.Context, raw string, n int) (Result, model.
 		res, err := r.Search(ctx, Query{Text: target.Query, Limit: n})
 		return res, model.Thread{}, err
 	default:
-		return Result{}, model.Thread{}, fmt.Errorf("unsupported URL: %s", raw)
+		return Result{}, model.Thread{}, invalid("unsupported URL: %s", raw)
 	}
 }
 
@@ -192,7 +211,7 @@ func (r *Reader) FromURL(ctx context.Context, raw string, n int) (Result, model.
 func (r *Reader) Thread(ctx context.Context, handle, postID string, n int) (model.Thread, error) {
 	h := xui.NormalizeHandle(handle)
 	if h == "" || postID == "" {
-		return model.Thread{}, errors.New("handle and post id are required")
+		return model.Thread{}, invalid("handle and post id are required")
 	}
 
 	res, err := r.timeline(ctx, cacheKey("thread|"+h+"|"+postID, n), xui.PostURL(h, postID), ClampLimit(n))
@@ -200,7 +219,7 @@ func (r *Reader) Thread(ctx context.Context, handle, postID string, n int) (mode
 		return model.Thread{}, err
 	}
 	if len(res.Posts) == 0 {
-		return model.Thread{}, errors.New("no posts found for that thread")
+		return model.Thread{}, notFound("no posts found for that thread; it may be deleted, private, or the id may be wrong")
 	}
 	return model.Thread{Root: res.Posts[0], Replies: res.Posts[1:]}, nil
 }
@@ -260,6 +279,9 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 	var (
 		gathered []model.Post
 		stalled  int
+		// The first thing that went wrong, kept in case nothing is gathered: an
+		// empty timeline and a browser that died look identical from here.
+		failed   error
 		deadline = time.Now().Add(settleTimeout)
 	)
 
@@ -273,6 +295,9 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 		}
 
 		batch, err := scrape(page, n)
+		if err != nil && failed == nil {
+			failed = err
+		}
 		if err == nil {
 			before := len(gathered)
 			gathered = model.Dedupe(append(gathered, batch...), n)
@@ -296,15 +321,35 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 		}
 
 		if _, err := page.Rod().Eval(xui.ScrollScript); err != nil {
+			if failed == nil {
+				failed = err
+			}
 			break
 		}
 		time.Sleep(scrollPause)
 	}
 
 	if len(gathered) == 0 {
-		return nil, errors.New("no posts found; X may not have rendered the timeline")
+		return nil, cameBackEmpty(ctx.Err(), failed)
 	}
 	return gathered, nil
+}
+
+// cameBackEmpty decides what a read that gathered nothing should report.
+//
+// Nothing gathered has three causes that look identical from the end of the
+// loop: the caller's budget ran out, something broke while reading, or the
+// timeline genuinely had nothing. Only the third is "not found", and answering
+// that for either of the others sends the caller looking for a post that may
+// well exist while hiding the fault that stopped it being found.
+func cameBackEmpty(ctxErr, failed error) error {
+	if ctxErr != nil {
+		return ctxErr
+	}
+	if failed != nil {
+		return failed
+	}
+	return notFound("no posts found; the account or list may not exist, or X did not render the timeline")
 }
 
 // scrape runs the extraction script and converts what it finds.

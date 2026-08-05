@@ -14,7 +14,12 @@ unless `-allow-writes`, and unregistered when off. Each requires a confirmation
 token minted at startup, paced like a person, and recorded in an append-only
 audit log.
 
-**Interfaces** — MCP over streamable HTTP, plus a REST API.
+**Interfaces** — MCP over streamable HTTP, plus a REST API. Failures say what
+they were: a request that was wrong, a surface X does not have, a profile held by
+a login or a write, or a read that ran out of time. Only a fault the caller can
+do nothing about is hidden behind `internal error`. A request has to address the
+server by name and carry no `Origin`, which keeps a page in an ordinary browser
+off the port.
 
 **A warm browser** — reads share one Chrome instead of launching and quitting
 per request, which cut the median uncached read from 3.58s to 2.02s. It is
@@ -28,18 +33,6 @@ Chrome may hold the profile, and closed after `-browser-idle` with no reads.
 `ResultTTL` and `StatusTTL` are fixed at five minutes and are not flags. A
 cached read costs nothing at all, so for read-heavy use a longer TTL is a bigger
 win than any transport change.
-
-### Better failure messages
-
-Anything that is not "login required" or "rate limited" collapses to
-`internal error`. A list id that does not exist should say so rather than
-report a server fault.
-
-### Close the DNS-rebinding gap
-
-The MCP handler does not validate `Origin` or `Host`, so a page in an ordinary
-browser can reach the loopback server. Documented in SECURITY.md; worth fixing
-rather than only documenting.
 
 ### More read surfaces
 

@@ -33,7 +33,8 @@ go install github.com/SohrabZ/x-browser-mcp@latest
 Requires [Go 1.25+](https://go.dev/dl/). The binary lands in `$(go env GOPATH)/bin`
 — add that to your `PATH` if it isn't already.
 
-To pin a version instead, use a tag: `@v0.0.4`.
+To pin a version instead, append a tag from
+[releases](https://github.com/SohrabZ/x-browser-mcp/releases).
 
 ### From source
 
@@ -217,6 +218,12 @@ wrong: `403` if the token is wrong, `400` if the request is, `412` if the sessio
 needs a sign-in, `429` if the write budget is spent, and `502` if the action was
 attempted and X did not apply it.
 
+A read says the same way: `400` for a request that was wrong, `404` for a post,
+account or list X had nothing on, `412` if the session needs a sign-in, `429` if
+the read budget is spent, `503` if a login or a write holds the profile, and
+`504` if it ran out of time. Only a fault you can do nothing about is hidden
+behind `internal error`.
+
 ## Writing
 
 Write actions are **disabled unless you pass `-allow-writes`**, and when
@@ -274,6 +281,7 @@ act as you.
 | `-allow-writes`   | `false`             | enable write tools                   |
 | `-fetch-timeout`  | `45s`               | budget for one read                  |
 | `-login-timeout`  | `5m`                | how long a login window stays open   |
+| `-allowed-host`   | none                | extra `Host` name to answer to (repeatable) |
 | `-write-timeout`  | `2m`                | budget for one write, incl. confirming it |
 | `-browser-idle`   | `3m`                | how long a browser stays warm (0 = off) |
 | `-read-interval`  | `3s`                | minimum gap between live reads       |
@@ -285,6 +293,12 @@ act as you.
 | `-write-max`      | `6`                 | maximum writes per window            |
 
 `X_BROWSER_MCP_CHROME` overrides Chrome detection.
+
+Requests have to address the server by name — `localhost`, `127.0.0.1`, whatever
+`-addr` binds, or a name given with `-allowed-host` — and anything carrying an
+`Origin` at all is refused with `403`, since that means a browser is calling. That
+is what keeps a page you visit from reaching the port; see
+[SECURITY.md](SECURITY.md).
 
 ## Notes
 

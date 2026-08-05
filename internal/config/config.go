@@ -38,6 +38,15 @@ type Config struct {
 	FetchTimeout time.Duration
 	LoginTimeout time.Duration
 
+	// AllowedHosts are further names the server answers to, beyond loopback and
+	// whatever ListenAddr binds.
+	//
+	// Every request has to address the server by name, which is what keeps a web
+	// page from reaching it after re-resolving a domain to this machine. A bind
+	// beyond loopback that is reached by hostname needs that name listed here,
+	// because no client sends "0.0.0.0" and this cannot guess the rest.
+	AllowedHosts []string
+
 	// WriteTimeout bounds one mutating action. It is separate from FetchTimeout
 	// because a write is not a fetch: it starts a browser of its own, presses a
 	// control, waits for X's request to finish, and then reloads the post to

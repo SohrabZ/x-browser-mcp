@@ -54,7 +54,7 @@ func NewGate(enabled bool) (*Gate, error) {
 }
 
 // Enabled reports whether write tools should be registered at all.
-func (g *Gate) Enabled() bool { return g.enabled }
+func (g *Gate) Enabled() bool { return g != nil && g.enabled }
 
 // Token returns the confirmation token for display to the operator.
 func (g *Gate) Token() string {
