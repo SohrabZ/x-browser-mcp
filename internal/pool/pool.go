@@ -430,23 +430,11 @@ func (p *Pool) Reserve(ctx context.Context) (Reservation, error) {
 		return nil, err
 	}
 
-	// Deciding the pool is open and taking its session must be one step. Close
-	// sets closed and takes the session in a single hold of the lock, so
-	// splitting them here lets a shutdown slip between: this would find the
-	// session already gone, report nothing left to close, and hand the profile
-	// to a login window while Close was still shutting that browser down.
-	//
-	// Taking it is also what makes the shutdown below this reservation's own --
-	// whoever removes the session closes it, and only one caller can.
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
+	session, err := p.claimSession()
+	if err != nil {
 		p.releaseExclusive(done)
-		return nil, ErrClosed
+		return nil, err
 	}
-	session := p.session
-	p.session = nil
-	p.mu.Unlock()
 
 	// A reservation keeps other callers out; it is not what keeps a second
 	// Chrome off the directory. That is decided when one is started, against
@@ -461,6 +449,34 @@ func (p *Pool) Reserve(ctx context.Context) (Reservation, error) {
 		}
 	}
 	return &exclusive{pool: p, done: done}, nil
+}
+
+// claimSession hands the pooled session to a reservation, or reports that the
+// pool has shut down.
+//
+// Those are one decision, not two, which is why they live in one function
+// rather than inline at the call site. Close sets closed and takes the session
+// in a single hold of the lock, so checking one and then taking the other
+// leaves a gap for a shutdown to land in: the reservation would find the
+// session already gone, conclude there was nothing left to close, and hand the
+// profile to a login window while Close was still closing that browser.
+//
+// No test will tell you if that gap is reintroduced -- it is a few instructions
+// wide and cannot be staged -- so the only thing keeping it closed is that
+// splitting this function would obviously be splitting it.
+//
+// Taking the session is also what makes its shutdown the reservation's own:
+// whoever removes it closes it, and only one caller can.
+func (p *Pool) claimSession() (Session, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return nil, ErrClosed
+	}
+	s := p.session
+	p.session = nil
+	return s, nil
 }
 
 // exclusive is a held reservation.
