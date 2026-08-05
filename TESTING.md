@@ -98,26 +98,64 @@ Expect the root plus 10 replies, each carrying one entry in `media` and an empty
 Note that X's own reply counter shows `1` for that post — self-thread replies do
 not count toward it, so the counter is not a check on this.
 
-### 4. MCP clients
+### 4. End-to-end check with an agent
+
+Connectivity first:
 
 ```bash
-# Claude Code
-claude mcp list          # expect: ✔ Connected
-
-# Hermes
-hermes mcp test x-browser-mcp    # expect: Tools discovered: 9
+claude mcp list                  # expect: x-browser-mcp ... ✔ Connected
+hermes mcp test x-browser-mcp    # expect: ✓ Tools discovered: 9
 ```
 
-Then drive an agent end to end, which is the only way to see whether the tool
-descriptions actually steer a model to the right call:
+Connectivity is not the interesting part. **Tool descriptions are prompts**, and
+the only way to know whether they steer a model to the right call is to let a
+model choose. A tool that works perfectly over `curl` still fails in practice if
+the description does not make a model reach for it — that failure is invisible
+to every other kind of test here.
+
+Always ask the agent to report the tool calls it made. Without that, a fluent
+answer assembled from the model's own knowledge is indistinguishable from a real
+one.
+
+#### Hermes
+
+Non-interactive, so it scripts well:
 
 ```bash
 hermes -z "Use x-browser-mcp to read https://x.com/LogoDiffusion/status/2076415564449190234 \
- — how many replies, and what do they contain? List the exact tool calls you made."
+ — how many replies are in that thread, and what do they contain? \
+ Then list the exact tool calls you made."
 ```
 
-A correct run picks `read_x_url` unprompted and reports 10 image-only replies. If
-it reaches for `search_x` instead, a tool description is not doing its job.
+#### Claude Code
+
+Paste the same prompt into a session, or:
+
+```bash
+claude -p "Use the x-browser-mcp tools to read my X home timeline (5 posts). \
+ List each author handle and a one-line summary, then tell me which tool calls you made."
+```
+
+#### What a passing run looks like
+
+| Check | Pass | Fail means |
+| --- | --- | --- |
+| Tool selection | picks `read_x_url` for a pasted link | the description is not steering; the model falls back to `search_x` and loops |
+| Content | 10 replies, image-only, from `@LogoDiffusion` | post validation is discarding media-only posts again |
+| Reported calls | names the tools it actually invoked | it may have answered from memory without calling anything |
+| `cached` flag | `false` on a first read | you are testing the cache, not the browser |
+
+#### Interpreting failures
+
+- **"MCP unreachable"** — the server is not running, or it was restarted
+  mid-call. Rebuilding while an agent is mid-test produces exactly this. Check
+  `curl -s http://127.0.0.1:18110/health` before blaming the client.
+- **Only `search_x` attempted, repeatedly** — the model could not find a tool
+  matching the request. Read that as a description problem, not a model problem.
+- **Plausible answer, no tool calls listed** — treat as a failed run. Re-ask
+  with an explicit instruction to use the tools.
+- **A tool the client cannot see** — after adding a tool, clients discover it on
+  a fresh session. Re-run `hermes mcp test` to confirm the count changed.
 
 ### 5. Write gating
 
