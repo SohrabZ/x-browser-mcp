@@ -69,10 +69,13 @@ func Default() Config {
 
 		// Paced enough that an agent cannot hammer X, loose enough that ordinary
 		// use does not hit it: a single question often costs two or three reads,
-		// and the earlier 8-per-10-minutes ceiling was spent by one test pass.
-		// Cached reads never count, so this only limits live browser fetches.
+		// and an earlier 8-per-10-minutes ceiling was spent by one test pass.
+		//
+		// Reads are not engagement -- a person opening several tabs at once looks
+		// exactly like this -- so the gap only has to stop a runaway loop, not
+		// imitate a human rhythm. Cached reads never count.
 		ReadPace: Pace{
-			MinInterval: 5 * time.Second,
+			MinInterval: 3 * time.Second,
 			Window:      10 * time.Minute,
 			Max:         30,
 		},

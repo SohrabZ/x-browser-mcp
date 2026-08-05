@@ -80,7 +80,7 @@ curl -s -X POST http://127.0.0.1:18110/api/v1/search \
   -H 'Content-Type: application/json' -d '{"query":"golang","limit":5}'
 ```
 
-Each should return real posts. Reads are paced — 5s apart, 30 per 10 minutes —
+Each should return real posts. Reads are paced — 3s apart, 30 per 10 minutes —
 so a long pass may still return `429`. That is the limiter working, not a bug.
 The budget is in memory, so restarting the server clears it.
 

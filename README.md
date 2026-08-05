@@ -27,14 +27,13 @@ Agent ──MCP──▶ x-browser-mcp ──CDP──▶ Chrome (your profile) 
 One command, no clone:
 
 ```bash
-go install github.com/SohrabZ/x-browser-mcp@v0.0.3
+go install github.com/SohrabZ/x-browser-mcp@latest
 ```
 
 Requires [Go 1.25+](https://go.dev/dl/). The binary lands in `$(go env GOPATH)/bin`
 — add that to your `PATH` if it isn't already.
 
-`@latest` works too, once Go's module proxy refreshes its cached alias for this
-repo.
+To pin a version instead, use a tag: `@v0.0.4`.
 
 ### From source
 
@@ -116,7 +115,7 @@ Everything is available over both MCP and a plain HTTP API.
 ## Quick start
 
 ```bash
-go install github.com/SohrabZ/x-browser-mcp@v0.0.3
+go install github.com/SohrabZ/x-browser-mcp@latest
 x-browser-mcp
 ```
 
@@ -258,7 +257,7 @@ act as you.
 | `-allow-writes`   | `false`             | enable write tools                   |
 | `-fetch-timeout`  | `45s`               | budget for one read                  |
 | `-login-timeout`  | `5m`                | how long a login window stays open   |
-| `-read-interval`  | `5s`                | minimum gap between live reads       |
+| `-read-interval`  | `3s`                | minimum gap between live reads       |
 | `-read-window`    | `10m`               | rolling window for the read budget   |
 | `-read-max`       | `30`                | maximum live reads per window        |
 | `-write-interval` | `45s`               | minimum gap between writes           |
@@ -272,7 +271,7 @@ act as you.
 
 - The first read after an idle period takes 10–20 seconds; it cold-starts
   Chrome. Later reads are cached.
-- Reads are paced (5s apart, 30 per 10 minutes) and cached reads cost nothing.
+- Reads are paced (3s apart, 30 per 10 minutes) and cached reads cost nothing.
   Driving a browser at X too eagerly is what gets sessions flagged.
 - Writes are paced to look like a person, not an agent: at least 45s apart plus
   a random extra delay, and at most 6 an hour. Engagement arriving at a fixed
