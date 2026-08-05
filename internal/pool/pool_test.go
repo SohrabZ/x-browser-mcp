@@ -1254,3 +1254,61 @@ func TestReserveIsRefusedAfterShutdown(t *testing.T) {
 		t.Fatalf("got %v, want ErrClosed", err)
 	}
 }
+
+// A browser taken out of service still owns the profile until the caller using
+// it lets go and it shuts down. Nothing may start a replacement in the meantime:
+// the launch would land on a directory the old Chrome still holds, turning one
+// caller's retirement into another's failed read.
+func TestAcquireWaitsForARetiringSessionToGo(t *testing.T) {
+	open, launches, made := counting()
+	p := New(open, time.Minute)
+	defer p.Close()
+
+	// A holds a lease on the session.
+	a, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	// The session is taken out of service while A is still using it, so it
+	// cannot be shut down yet.
+	p.mu.Lock()
+	p.retireLocked(a.Session)
+	p.mu.Unlock()
+
+	// C asks for a browser. There is no session, nothing closing and nothing
+	// opening -- but the retired one is still out there.
+	got := make(chan error, 1)
+	go func() {
+		lease, err := p.Acquire(context.Background())
+		if err == nil {
+			lease.Release()
+		}
+		got <- err
+	}()
+
+	select {
+	case <-got:
+		t.Fatal("a replacement was started while the retired browser still held the profile")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if n := launches.Load(); n != 1 {
+		t.Fatalf("%d browsers launched while one was still retiring", n)
+	}
+
+	// A lets go; the retired browser shuts down and C may proceed.
+	a.Release()
+
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("acquire after the retirement finished: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("acquire never completed after the retirement finished")
+	}
+
+	if !(*made)[0].closed.Load() {
+		t.Fatal("the retired browser was never shut down")
+	}
+}

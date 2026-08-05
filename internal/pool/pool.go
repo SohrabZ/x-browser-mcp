@@ -117,6 +117,12 @@ type Pool struct {
 	// be handed out either, so it is held here until the last one drains.
 	retiring Session
 
+	// retired is closed when the retiring session moves on to its shutdown. It
+	// is what a caller waits on: a retired browser still holds the profile,
+	// and starting a replacement before it has gone is the failure this
+	// package exists to prevent.
+	retired chan struct{}
+
 	now       func() time.Time
 	afterFunc func(time.Duration, func()) *time.Timer
 }
@@ -159,6 +165,7 @@ func (p *Pool) retireLocked(s Session) {
 	}
 	if p.retiring == nil {
 		p.retiring = s
+		p.retired = make(chan struct{})
 		return
 	}
 	// Another session is already awaiting shutdown, which cannot happen while
@@ -176,6 +183,10 @@ func (p *Pool) closeRetiredLocked() {
 	}
 	s := p.retiring
 	p.retiring = nil
+	if p.retired != nil {
+		close(p.retired)
+		p.retired = nil
+	}
 	p.beginCloseLocked(s)
 }
 
@@ -246,6 +257,19 @@ func (p *Pool) Acquire(ctx context.Context) (*Lease, error) {
 		// failing: a write holds it for seconds, and a queued read is better
 		// than a spurious error.
 		if wait := p.exclusive; wait != nil {
+			p.mu.Unlock()
+			if err := waitFor(ctx, wait); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		// A browser taken out of service still owns the profile until the last
+		// caller using it lets go and it shuts down. Starting a replacement now
+		// would put a second Chrome on the directory -- which the launch itself
+		// refuses, turning someone else's retirement into this caller's failed
+		// read.
+		if wait := p.retired; wait != nil {
 			p.mu.Unlock()
 			if err := waitFor(ctx, wait); err != nil {
 				return nil, err
@@ -476,6 +500,11 @@ func (p *Pool) Close() {
 	p.stopIdleTimerLocked()
 	session := p.session
 	p.session = nil
+	// Release anyone waiting on a retirement that will now never be handed on.
+	if p.retired != nil {
+		close(p.retired)
+		p.retired = nil
+	}
 	p.mu.Unlock()
 
 	if session != nil {
