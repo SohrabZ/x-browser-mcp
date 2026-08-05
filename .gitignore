@@ -1,0 +1,22 @@
+# Compiled binary
+/x-browser-mcp
+
+# Session state — browser profile, cookies, audit log. Never commit these:
+# the profile holds a live X login.
+/.x-browser-mcp/
+debug-chrome/
+chrome-user-data/
+*_cookies.json
+
+# Logs
+*.log
+*.err
+
+# Go
+*.out
+*.test
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

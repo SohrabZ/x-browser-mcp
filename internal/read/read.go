@@ -1,0 +1,268 @@
+// Package read implements the X read surfaces: timelines, search, threads,
+// bookmarks and lists.
+package read
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"x-browser-mcp/internal/auth"
+	"x-browser-mcp/internal/browser"
+	"x-browser-mcp/internal/limit"
+	"x-browser-mcp/internal/model"
+	"x-browser-mcp/internal/xui"
+)
+
+// Result is a set of posts plus the accounts that produced them.
+type Result struct {
+	Posts        []model.Post        `json:"posts"`
+	Contributors []model.Contributor `json:"contributors"`
+	FetchedAt    time.Time           `json:"fetched_at"`
+	Cached       bool                `json:"cached"`
+}
+
+// Query describes a search request.
+type Query struct {
+	Text  string
+	Mode  xui.SearchMode
+	Limit int
+}
+
+// Limits on how much a single call may ask for.
+const (
+	DefaultLimit  = 8
+	MaxLimit      = 50
+	maxScrolls    = 12
+	settleTimeout = 20 * time.Second
+)
+
+// ClampLimit brings a caller-supplied limit into range.
+func ClampLimit(n int) int {
+	if n <= 0 {
+		return DefaultLimit
+	}
+	if n > MaxLimit {
+		return MaxLimit
+	}
+	return n
+}
+
+// Opener starts a browser session against the persistent profile.
+type Opener func(ctx context.Context, headless bool) (*browser.Session, error)
+
+// Reader reads X through a browser.
+type Reader struct {
+	open   Opener
+	auth   *auth.Manager
+	budget *limit.Budget
+	cache  *cache
+
+	timeout time.Duration
+}
+
+// Options configures a Reader.
+type Options struct {
+	Open     Opener
+	Auth     *auth.Manager
+	Budget   *limit.Budget
+	CacheFor time.Duration
+	Timeout  time.Duration
+}
+
+// New builds a Reader.
+func New(opts Options) *Reader {
+	return &Reader{
+		open:    opts.Open,
+		auth:    opts.Auth,
+		budget:  opts.Budget,
+		cache:   newCache(opts.CacheFor),
+		timeout: opts.Timeout,
+	}
+}
+
+// Home reads the signed-in home timeline.
+func (r *Reader) Home(ctx context.Context, n int) (Result, error) {
+	n = ClampLimit(n)
+	return r.timeline(ctx, cacheKey("home", n), xui.HomeURL, n)
+}
+
+// Search reads recent posts matching a query.
+func (r *Reader) Search(ctx context.Context, q Query) (Result, error) {
+	if q.Text == "" {
+		return Result{}, errors.New("search query is required")
+	}
+	if !q.Mode.Valid() {
+		q.Mode = xui.Latest
+	}
+	n := ClampLimit(q.Limit)
+
+	key := cacheKey(fmt.Sprintf("search|%s|%s", q.Text, q.Mode), n)
+	return r.timeline(ctx, key, xui.SearchURL(q.Text, q.Mode), n)
+}
+
+// UserPosts reads an account's own timeline.
+func (r *Reader) UserPosts(ctx context.Context, handle string, n int) (Result, error) {
+	h := xui.NormalizeHandle(handle)
+	if h == "" {
+		return Result{}, errors.New("handle is required")
+	}
+	n = ClampLimit(n)
+	return r.timeline(ctx, cacheKey("user|"+h, n), xui.UserURL(h), n)
+}
+
+// Bookmarks reads the signed-in account's saved posts.
+func (r *Reader) Bookmarks(ctx context.Context, n int) (Result, error) {
+	n = ClampLimit(n)
+	return r.timeline(ctx, cacheKey("bookmarks", n), xui.BookmarksURL, n)
+}
+
+// List reads a curated list's timeline.
+func (r *Reader) List(ctx context.Context, listID string, n int) (Result, error) {
+	if listID == "" {
+		return Result{}, errors.New("list id is required")
+	}
+	n = ClampLimit(n)
+	return r.timeline(ctx, cacheKey("list|"+listID, n), xui.ListURL(listID), n)
+}
+
+// Thread reads a post together with the replies shown beneath it.
+//
+// X renders the root and its replies as the same kind of article, so the first
+// post on the page is the root and the rest are replies.
+func (r *Reader) Thread(ctx context.Context, handle, postID string, n int) (model.Thread, error) {
+	h := xui.NormalizeHandle(handle)
+	if h == "" || postID == "" {
+		return model.Thread{}, errors.New("handle and post id are required")
+	}
+
+	res, err := r.timeline(ctx, cacheKey("thread|"+h+"|"+postID, n), xui.PostURL(h, postID), ClampLimit(n))
+	if err != nil {
+		return model.Thread{}, err
+	}
+	if len(res.Posts) == 0 {
+		return model.Thread{}, errors.New("no posts found for that thread")
+	}
+	return model.Thread{Root: res.Posts[0], Replies: res.Posts[1:]}, nil
+}
+
+// timeline is the shared path behind every surface: cache, budget, auth, then
+// scroll-and-collect until the target count is reached or the page stops
+// producing new posts.
+func (r *Reader) timeline(ctx context.Context, key, url string, n int) (Result, error) {
+	if hit, ok := r.cache.get(key); ok {
+		hit.Cached = true
+		return hit, nil
+	}
+
+	if err := r.auth.Require(ctx); err != nil {
+		return Result{}, err
+	}
+	if err := r.budget.Wait(ctx); err != nil {
+		return Result{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+
+	posts, err := r.collect(ctx, url, n)
+	if err != nil {
+		return Result{}, err
+	}
+
+	result := Result{
+		Posts:        posts,
+		Contributors: model.Contributors(posts),
+		FetchedAt:    time.Now().UTC(),
+	}
+	r.cache.put(key, result)
+	return result, nil
+}
+
+// collect opens the page and scrolls until it has enough posts or the timeline
+// stops yielding new ones.
+func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, error) {
+	session, err := r.open(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	defer session.Close()
+
+	page, err := session.Page()
+	if err != nil {
+		return nil, err
+	}
+	defer page.Close()
+
+	if err := page.Goto(url); err != nil {
+		return nil, err
+	}
+
+	var (
+		gathered []model.Post
+		stalled  int
+		deadline = time.Now().Add(settleTimeout)
+	)
+
+	for scroll := 0; scroll < maxScrolls; scroll++ {
+		if err := ctx.Err(); err != nil {
+			// Partial results beat nothing when the caller's budget runs out.
+			if len(gathered) > 0 {
+				return gathered, nil
+			}
+			return nil, err
+		}
+
+		batch, err := scrape(page, n)
+		if err == nil {
+			before := len(gathered)
+			gathered = model.Dedupe(append(gathered, batch...), n)
+
+			if len(gathered) >= n {
+				return gathered, nil
+			}
+			if len(gathered) > before {
+				stalled = 0
+			} else {
+				stalled++
+			}
+		}
+
+		// Two rounds with nothing new means the timeline has given what it has.
+		if stalled >= 2 && len(gathered) > 0 {
+			return gathered, nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+
+		if _, err := page.Rod().Eval(xui.ScrollScript); err != nil {
+			break
+		}
+		time.Sleep(1200 * time.Millisecond)
+	}
+
+	if len(gathered) == 0 {
+		return nil, errors.New("no posts found; X may not have rendered the timeline")
+	}
+	return gathered, nil
+}
+
+// scrape runs the extraction script and converts what it finds.
+func scrape(page *browser.Page, n int) ([]model.Post, error) {
+	value, err := page.Rod().Eval(xui.ExtractScript, n)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw []xui.RawPost
+	if err := value.Value.Unmarshal(&raw); err != nil {
+		return nil, fmt.Errorf("decode scraped posts: %w", err)
+	}
+	return xui.ToPosts(raw), nil
+}
+
+func cacheKey(prefix string, n int) string {
+	return fmt.Sprintf("%s|%d", prefix, n)
+}

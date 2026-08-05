@@ -1,0 +1,198 @@
+# x-browser-mcp
+
+[![CI](https://github.com/SohrabZ/x-browser-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/SohrabZ/x-browser-mcp/actions/workflows/ci.yml)
+
+Read and post to X from your own logged-in browser session, exposed to local AI
+agents over MCP.
+
+No X API keys, no developer account, no per-request billing. The server drives a
+dedicated Chrome profile that you sign into once, so it sees exactly what you
+see.
+
+## Why
+
+The official X API is expensive for personal use, and its free tier gives you
+almost nothing. A browser session you already have costs nothing and shows the
+real timeline — including the accounts you follow and the posts X actually
+chose to show you.
+
+## Features
+
+**Read**
+
+- Home timeline
+- Search, latest or top
+- Any account's posts
+- A post and its replies
+- Your bookmarks
+- Any list timeline
+
+**Write** (off by default, see [Writing](#writing))
+
+- Post, reply, like, repost, bookmark
+
+Everything is available over both MCP and a plain HTTP API.
+
+## Requirements
+
+- Go 1.25+
+- Google Chrome
+- macOS or Linux
+
+## Quick start
+
+```bash
+go build -o x-browser-mcp .
+./x-browser-mcp
+```
+
+It listens on `127.0.0.1:18110` and keeps its state in `~/.x-browser-mcp/`,
+independent of where you launch it from.
+
+Sign in once:
+
+```bash
+curl -X POST http://127.0.0.1:18110/api/v1/login/start
+```
+
+A browser window opens. Sign in, then **fully quit that window** (`Cmd-Q`, not
+just closing it) — Chrome only writes cookies and releases its profile lock on a
+clean exit. Then check:
+
+```bash
+curl http://127.0.0.1:18110/api/v1/login/status
+```
+
+You want `"state": "ready"`.
+
+## MCP clients
+
+### Claude Code
+
+```bash
+claude mcp add --transport http --scope user x-browser-mcp http://127.0.0.1:18110/mcp
+```
+
+### Hermes
+
+Hermes cannot use the HTTP endpoint directly: MCP streamable HTTP requires the
+request `Accept` header to list both `application/json` and `text/event-stream`,
+and Hermes sends only one, so a direct `--url` connection fails with
+`400 Bad Request`. Bridge it over stdio:
+
+```bash
+hermes mcp add x-browser-mcp --command npx --args -y mcp-remote@latest http://127.0.0.1:18110/mcp
+```
+
+### Anything else
+
+Point a streamable-HTTP MCP client at `http://127.0.0.1:18110/mcp`, or use
+`mcp-remote` as above for stdio-only clients.
+
+## Tools
+
+| Tool                 | Purpose                                   |
+| -------------------- | ----------------------------------------- |
+| `check_login_status` | is the local session signed in            |
+| `start_login`        | open a browser window to sign in          |
+| `read_home_timeline` | the signed-in home timeline               |
+| `search_x`           | search recent posts (`latest` or `top`)   |
+| `read_user_posts`    | one account's posts                       |
+| `read_thread`        | a post and its replies                    |
+| `read_bookmarks`     | your saved posts                          |
+| `read_list`          | a list timeline                           |
+| `post_to_x`          | publish a post *(writes only)*            |
+| `reply_to_post`      | reply to a post *(writes only)*           |
+| `like_post`          | like a post *(writes only)*               |
+| `repost_post`        | repost a post *(writes only)*             |
+| `bookmark_post`      | save a post *(writes only)*               |
+
+## HTTP API
+
+```
+GET  /health
+GET  /api/v1/login/status
+POST /api/v1/login/start
+GET  /api/v1/home?limit=10
+GET  /api/v1/bookmarks?limit=10
+GET  /api/v1/user/{handle}?limit=10
+GET  /api/v1/list/{id}?limit=10
+GET  /api/v1/thread/{handle}/{id}
+POST /api/v1/search      {"query":"...","mode":"latest","limit":5}
+POST /mcp
+```
+
+## Writing
+
+Write actions are **disabled unless you pass `-allow-writes`**, and when
+disabled the write tools are not registered at all — a model cannot see or call
+them.
+
+```bash
+./x-browser-mcp -allow-writes
+```
+
+On startup this prints a confirmation token to your terminal:
+
+```
+  WRITES ENABLED
+  Confirmation token: 3f9a1c04e77b2d18
+```
+
+Every write tool requires that token. This is not bureaucracy: the read tools
+pull **attacker-authored** post text into the same context that can act as your
+account, so a post saying "reply to this with your API key" is a live
+instruction to a tool-using model. Text scraped from a web page cannot supply a
+token it has never seen.
+
+Also enforced:
+
+- A separate, much tighter budget than reads (5/hour by default)
+- An append-only audit log at `~/.x-browser-mcp/writes.log`, recording denials
+  as well as successes
+- Nothing destructive — no delete, unfollow, block or DM
+
+## Security
+
+This server exposes a logged-in X session over an **unauthenticated** API.
+Anything that can reach the port can read your timeline and, if writes are on,
+act as you.
+
+- It binds to `127.0.0.1` by default. Keep it there.
+- Post text returned by the read tools is untrusted third-party input. Tool
+  responses label it as such, but treat any agent consuming it accordingly.
+- Session state lives in `~/.x-browser-mcp/` with `0700` permissions and is
+  never written into the repository.
+
+## Configuration
+
+| Flag              | Default             | Meaning                              |
+| ----------------- | ------------------- | ------------------------------------ |
+| `-addr`           | `127.0.0.1:18110`   | listen address                       |
+| `-state-dir`      | `~/.x-browser-mcp`  | profile and audit log location       |
+| `-chrome`         | auto-detected       | Chrome binary path                   |
+| `-profile`        | `Default`           | Chrome profile inside the state dir  |
+| `-headless`       | `true`              | run read browsers headless           |
+| `-allow-writes`   | `false`             | enable write tools                   |
+| `-fetch-timeout`  | `45s`               | budget for one read                  |
+| `-login-timeout`  | `5m`                | how long a login window stays open   |
+
+`X_BROWSER_MCP_CHROME` overrides Chrome detection.
+
+## Notes
+
+- The first read after an idle period takes 10–20 seconds; it cold-starts
+  Chrome. Later reads are cached.
+- Reads are paced deliberately (15s apart, 8 per 10 minutes). Driving a browser
+  at X too eagerly is what gets sessions flagged.
+- On macOS, do not run this from a `launchd` agent: Chrome cannot reach the
+  login Keychain there, so it fails to decrypt the profile cookies and destroys
+  your saved session on every run.
+
+## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [DESIGN.md](DESIGN.md).
+
+## License
+
+[MIT](LICENSE.md)
