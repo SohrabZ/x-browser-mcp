@@ -14,7 +14,7 @@ import (
 
 	"github.com/go-rod/rod/lib/proto"
 
-	"x-browser-mcp/internal/model"
+	"github.com/SohrabZ/x-browser-mcp/internal/model"
 )
 
 // Page URLs.

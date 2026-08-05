@@ -1,4 +1,4 @@
-module x-browser-mcp
+module github.com/SohrabZ/x-browser-mcp
 
 go 1.25
 

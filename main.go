@@ -14,15 +14,15 @@ import (
 	"syscall"
 	"time"
 
-	"x-browser-mcp/internal/auth"
-	"x-browser-mcp/internal/browser"
-	"x-browser-mcp/internal/config"
-	"x-browser-mcp/internal/httpapi"
-	"x-browser-mcp/internal/limit"
-	"x-browser-mcp/internal/mcpapi"
-	"x-browser-mcp/internal/read"
-	"x-browser-mcp/internal/write"
-	"x-browser-mcp/internal/xui"
+	"github.com/SohrabZ/x-browser-mcp/internal/auth"
+	"github.com/SohrabZ/x-browser-mcp/internal/browser"
+	"github.com/SohrabZ/x-browser-mcp/internal/config"
+	"github.com/SohrabZ/x-browser-mcp/internal/httpapi"
+	"github.com/SohrabZ/x-browser-mcp/internal/limit"
+	"github.com/SohrabZ/x-browser-mcp/internal/mcpapi"
+	"github.com/SohrabZ/x-browser-mcp/internal/read"
+	"github.com/SohrabZ/x-browser-mcp/internal/write"
+	"github.com/SohrabZ/x-browser-mcp/internal/xui"
 )
 
 func main() {

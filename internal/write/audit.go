@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"x-browser-mcp/internal/model"
+	"github.com/SohrabZ/x-browser-mcp/internal/model"
 )
 
 // Outcome is how a write attempt ended.

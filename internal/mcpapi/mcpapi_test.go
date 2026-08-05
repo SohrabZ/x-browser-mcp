@@ -8,9 +8,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"x-browser-mcp/internal/model"
-	"x-browser-mcp/internal/read"
-	"x-browser-mcp/internal/write"
+	"github.com/SohrabZ/x-browser-mcp/internal/model"
+	"github.com/SohrabZ/x-browser-mcp/internal/read"
+	"github.com/SohrabZ/x-browser-mcp/internal/write"
 )
 
 // writeToolNames are the tools that can act on the user's account.

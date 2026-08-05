@@ -9,11 +9,11 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"x-browser-mcp/internal/auth"
-	"x-browser-mcp/internal/model"
-	"x-browser-mcp/internal/read"
-	"x-browser-mcp/internal/write"
-	"x-browser-mcp/internal/xui"
+	"github.com/SohrabZ/x-browser-mcp/internal/auth"
+	"github.com/SohrabZ/x-browser-mcp/internal/model"
+	"github.com/SohrabZ/x-browser-mcp/internal/read"
+	"github.com/SohrabZ/x-browser-mcp/internal/write"
+	"github.com/SohrabZ/x-browser-mcp/internal/xui"
 )
 
 // Deps are what the tools operate on.

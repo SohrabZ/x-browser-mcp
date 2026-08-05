@@ -13,10 +13,10 @@ import (
 
 	"github.com/go-rod/rod/lib/proto"
 
-	"x-browser-mcp/internal/auth"
-	"x-browser-mcp/internal/browser"
-	"x-browser-mcp/internal/limit"
-	"x-browser-mcp/internal/xui"
+	"github.com/SohrabZ/x-browser-mcp/internal/auth"
+	"github.com/SohrabZ/x-browser-mcp/internal/browser"
+	"github.com/SohrabZ/x-browser-mcp/internal/limit"
+	"github.com/SohrabZ/x-browser-mcp/internal/xui"
 )
 
 // MaxPostRunes is X's limit for a standard account.

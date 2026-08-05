@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"x-browser-mcp/internal/model"
+	"github.com/SohrabZ/x-browser-mcp/internal/model"
 )
 
 func TestClampLimit(t *testing.T) {

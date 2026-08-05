@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"time"
 
-	"x-browser-mcp/internal/auth"
-	"x-browser-mcp/internal/browser"
-	"x-browser-mcp/internal/limit"
-	"x-browser-mcp/internal/model"
-	"x-browser-mcp/internal/xui"
+	"github.com/SohrabZ/x-browser-mcp/internal/auth"
+	"github.com/SohrabZ/x-browser-mcp/internal/browser"
+	"github.com/SohrabZ/x-browser-mcp/internal/limit"
+	"github.com/SohrabZ/x-browser-mcp/internal/model"
+	"github.com/SohrabZ/x-browser-mcp/internal/xui"
 )
 
 // Result is a set of posts plus the accounts that produced them.

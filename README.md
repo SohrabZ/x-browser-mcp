@@ -17,12 +17,32 @@ see.
 Agent ──MCP──▶ x-browser-mcp ──CDP──▶ Chrome (your profile) ──▶ x.com
 ```
 
-## Installation methods
+## Installation
 
-[![Claude Code](https://img.shields.io/badge/Claude_Code-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](#claude-code)
-[![Hermes](https://img.shields.io/badge/Hermes-6e40c9?style=for-the-badge&logo=probot&logoColor=white)](#hermes)
-[![Any MCP client](https://img.shields.io/badge/Any_MCP_client-008fe2?style=for-the-badge&logo=googlechrome&logoColor=white)](#anything-else)
-[![From source](https://img.shields.io/badge/From_source-ffdc53?style=for-the-badge&logo=go&logoColor=32383f)](#quick-start)
+[![go install](https://img.shields.io/badge/go_install-Recommended-00ADD8?style=for-the-badge&logo=go&logoColor=white)](#go-install-recommended)
+[![From source](https://img.shields.io/badge/From_source-ffdc53?style=for-the-badge&logo=go&logoColor=32383f)](#from-source)
+
+### go install (recommended)
+
+One command, no clone:
+
+```bash
+go install github.com/SohrabZ/x-browser-mcp@latest
+```
+
+Requires [Go 1.25+](https://go.dev/dl/). The binary lands in `$(go env GOPATH)/bin`
+— add that to your `PATH` if it isn't already.
+
+### From source
+
+```bash
+git clone https://github.com/SohrabZ/x-browser-mcp
+cd x-browser-mcp
+go build -o x-browser-mcp .
+```
+
+Then connect a client: [Claude Code](#claude-code) · [Hermes](#hermes) ·
+[anything else](#anything-else).
 
 ## Usage examples
 
@@ -83,8 +103,8 @@ Everything is available over both MCP and a plain HTTP API.
 ## Quick start
 
 ```bash
-go build -o x-browser-mcp .
-./x-browser-mcp
+go install github.com/SohrabZ/x-browser-mcp@latest
+x-browser-mcp
 ```
 
 It listens on `127.0.0.1:18110` and keeps its state in `~/.x-browser-mcp/`,

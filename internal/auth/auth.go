@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"x-browser-mcp/internal/browser"
-	"x-browser-mcp/internal/xui"
+	"github.com/SohrabZ/x-browser-mcp/internal/browser"
+	"github.com/SohrabZ/x-browser-mcp/internal/xui"
 )
 
 // ErrLoginRequired reports that no usable session exists.

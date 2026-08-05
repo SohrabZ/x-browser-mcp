@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"x-browser-mcp/internal/auth"
-	"x-browser-mcp/internal/limit"
+	"github.com/SohrabZ/x-browser-mcp/internal/auth"
+	"github.com/SohrabZ/x-browser-mcp/internal/limit"
 )
 
 func TestHealthIsAlwaysAvailable(t *testing.T) {
