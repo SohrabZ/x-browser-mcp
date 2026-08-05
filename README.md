@@ -102,7 +102,7 @@ chose to show you.
 
 **Write** (off by default, see [Writing](#writing))
 
-- Post, reply, like, repost, bookmark
+- Post, reply, like, repost, bookmark, remove a bookmark
 
 Everything is available over both MCP and a plain HTTP API.
 
@@ -180,9 +180,10 @@ Point a streamable-HTTP MCP client at `http://127.0.0.1:18110/mcp`, or use
 | `like_post`          | like a post                             | browser automation  | **no** — `-allow-writes` |
 | `repost_post`        | repost a post                           | browser automation  | **no** — `-allow-writes` |
 | `bookmark_post`      | save a post                             | browser automation  | **no** — `-allow-writes` |
+| `unbookmark_post`    | remove a saved post                     | browser automation  | **no** — `-allow-writes` |
 
 > [!NOTE]
-> When writes are disabled the five write tools are not registered at all, so a
+> When writes are disabled the six write tools are not registered at all, so a
 > connected model cannot see or call them. See [Writing](#writing).
 
 ## HTTP API

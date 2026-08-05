@@ -266,6 +266,16 @@ func registerWrite(s *mcp.Server, deps Deps) {
 		}
 		return textResult("Bookmarked."), actionOut{OK: true, Action: write.ActionBookmark}, nil
 	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "unbookmark_post",
+		Description: "Remove an X post from the signed-in user's bookmarks." + confirmNote,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in targetIn) (*mcp.CallToolResult, actionOut, error) {
+		if err := deps.Writer.Unbookmark(ctx, in.Handle, in.PostID, in.Confirm); err != nil {
+			return errorResult(err), actionOut{}, nil
+		}
+		return textResult("Removed from bookmarks."), actionOut{OK: true, Action: write.ActionUnbookmark}, nil
+	})
 }
 
 type startOut struct {

@@ -20,6 +20,7 @@ var writeToolNames = []string{
 	"like_post",
 	"repost_post",
 	"bookmark_post",
+	"unbookmark_post",
 }
 
 // listTools connects a real client over the SDK's in-memory transport and asks

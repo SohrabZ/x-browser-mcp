@@ -27,11 +27,12 @@ const MaxPostRunes = 280
 
 // Action names, used in the audit log and error messages.
 const (
-	ActionPost     = "post"
-	ActionReply    = "reply"
-	ActionLike     = "like"
-	ActionRepost   = "repost"
-	ActionBookmark = "bookmark"
+	ActionPost       = "post"
+	ActionReply      = "reply"
+	ActionLike       = "like"
+	ActionRepost     = "repost"
+	ActionBookmark   = "bookmark"
+	ActionUnbookmark = "unbookmark"
 )
 
 // Opener starts a browser session against the persistent profile.
@@ -165,6 +166,12 @@ func (w *Writer) Repost(ctx context.Context, handle, postID, confirm string) err
 // Bookmark saves a post.
 func (w *Writer) Bookmark(ctx context.Context, handle, postID, confirm string) error {
 	return w.tap(ctx, ActionBookmark, handle, postID, confirm, xui.SelBookmarkAdd, xui.SelBookmarkRemove)
+}
+
+// Unbookmark removes a post from the bookmarks. X toggles the same control, so
+// this is Bookmark with the two selectors the other way round.
+func (w *Writer) Unbookmark(ctx context.Context, handle, postID, confirm string) error {
+	return w.tap(ctx, ActionUnbookmark, handle, postID, confirm, xui.SelBookmarkRemove, xui.SelBookmarkAdd)
 }
 
 // tap is the shared shape for single-button actions.
