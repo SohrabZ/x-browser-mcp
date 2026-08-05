@@ -137,6 +137,9 @@ func run() error {
 		Audit:   write.NewAuditor(cfg.AuditLogPath()),
 		Reserve: browsers,
 		Timeout: cfg.FetchTimeout,
+
+		// A successful write changes what the next read should return.
+		OnChange: reader.Invalidate,
 	})
 
 	handler := httpapi.Handler(httpapi.Deps{

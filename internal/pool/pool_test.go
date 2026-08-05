@@ -1108,3 +1108,80 @@ func waitUntil(t *testing.T, cond func() bool, msg string) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// Shutdown must not leave a Chrome behind. A launch that is still in flight
+// ends with a browser holding the profile, and a process that exits without it
+// leaves one running that nothing is tracking and nobody expects.
+func TestCloseWaitsForAnInFlightLaunch(t *testing.T) {
+	landed := make(chan *fakeSession, 1)
+	release := make(chan struct{})
+	p := New(func(context.Context) (Session, error) {
+		<-release
+		s := &fakeSession{id: 1}
+		landed <- s
+		return s, nil
+	}, time.Minute)
+
+	go func() { _, _ = p.Acquire(context.Background()) }()
+	waitUntil(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.opening != nil
+	}, "no launch started")
+
+	closed := make(chan struct{})
+	go func() { p.Close(); close(closed) }()
+
+	// Close must still be waiting: the browser has not arrived yet.
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a launch was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close never returned")
+	}
+
+	session := <-landed
+	if !session.closed.Load() {
+		t.Fatal("the browser that arrived during shutdown was left running")
+	}
+}
+
+// ...but not forever. A lease that is never returned must not wedge the server
+// open; a browser left running is visible and killable, a process that will not
+// exit is neither.
+func TestCloseGivesUpOnALeaseThatNeverReturns(t *testing.T) {
+	open, _, _ := counting()
+	p := New(open, time.Minute)
+
+	lease, err := p.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer lease.Release()
+
+	// Retire the session while the lease is out, so a retiring browser is
+	// waiting on a lease that never comes back.
+	p.mu.Lock()
+	p.retireLocked(lease.Session)
+	p.mu.Unlock()
+
+	original := shutdownWait
+	shutdownWait = 100 * time.Millisecond
+	defer func() { shutdownWait = original }()
+
+	done := make(chan struct{})
+	go func() { p.Close(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close hung on a lease that was never returned")
+	}
+}

@@ -97,6 +97,15 @@ func New(opts Options) *Reader {
 }
 
 // Home reads the signed-in home timeline.
+// Invalidate drops every cached result.
+//
+// A write changes what the next read should return -- a new post belongs in the
+// timeline, a like belongs on the post -- and serving the pre-write copy for
+// the rest of the TTL makes the write look like it did not happen.
+func (r *Reader) Invalidate() {
+	r.cache.Invalidate()
+}
+
 func (r *Reader) Home(ctx context.Context, n int) (Result, error) {
 	n = ClampLimit(n)
 	return r.timeline(ctx, cacheKey("home", n), xui.HomeURL, n)

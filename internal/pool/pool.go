@@ -492,7 +492,38 @@ func (p *Pool) Close() {
 	if session != nil {
 		_ = session.Close()
 	}
+
+	// A launch or a shutdown may still be in flight, and both end with a Chrome
+	// this pool is responsible for. Returning now would let the process exit
+	// with one still starting up -- a browser nothing is tracking, holding the
+	// profile until someone finds and kills it. A launch already in progress is
+	// retired the moment it lands, because closed is set; this only waits for
+	// that to happen.
+	//
+	// The wait is bounded. A read that never returns its lease would otherwise
+	// keep a retiring session alive and hang shutdown behind it, and a server
+	// that will not exit is a worse failure than a browser left running -- one
+	// the user can see and quit.
+	quiet := make(chan struct{})
+	go func() {
+		p.mu.Lock()
+		for p.opening != nil || p.closing != nil || p.retiring != nil {
+			p.drained.Wait()
+		}
+		p.mu.Unlock()
+		close(quiet)
+	}()
+
+	select {
+	case <-quiet:
+	case <-time.After(shutdownWait):
+		slog.Warn("gave up waiting for the browser to shut down", "after", shutdownWait)
+	}
 }
+
+// shutdownWait bounds how long Close waits for in-flight browser work. It is a
+// variable so tests can shorten it.
+var shutdownWait = 15 * time.Second
 
 // Warm reports whether a session is currently held.
 func (p *Pool) Warm() bool {
