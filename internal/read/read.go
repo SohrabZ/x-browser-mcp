@@ -279,6 +279,9 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 	var (
 		gathered []model.Post
 		stalled  int
+		// The first thing that went wrong, kept in case nothing is gathered: an
+		// empty timeline and a browser that died look identical from here.
+		failed   error
 		deadline = time.Now().Add(settleTimeout)
 	)
 
@@ -292,6 +295,9 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 		}
 
 		batch, err := scrape(page, n)
+		if err != nil && failed == nil {
+			failed = err
+		}
 		if err == nil {
 			before := len(gathered)
 			gathered = model.Dedupe(append(gathered, batch...), n)
@@ -315,15 +321,35 @@ func (r *Reader) collect(ctx context.Context, url string, n int) ([]model.Post, 
 		}
 
 		if _, err := page.Rod().Eval(xui.ScrollScript); err != nil {
+			if failed == nil {
+				failed = err
+			}
 			break
 		}
 		time.Sleep(scrollPause)
 	}
 
 	if len(gathered) == 0 {
-		return nil, notFound("no posts found; the account or list may not exist, or X did not render the timeline")
+		return nil, cameBackEmpty(ctx.Err(), failed)
 	}
 	return gathered, nil
+}
+
+// cameBackEmpty decides what a read that gathered nothing should report.
+//
+// Nothing gathered has three causes that look identical from the end of the
+// loop: the caller's budget ran out, something broke while reading, or the
+// timeline genuinely had nothing. Only the third is "not found", and answering
+// that for either of the others sends the caller looking for a post that may
+// well exist while hiding the fault that stopped it being found.
+func cameBackEmpty(ctxErr, failed error) error {
+	if ctxErr != nil {
+		return ctxErr
+	}
+	if failed != nil {
+		return failed
+	}
+	return notFound("no posts found; the account or list may not exist, or X did not render the timeline")
 }
 
 // scrape runs the extraction script and converts what it finds.

@@ -29,14 +29,18 @@ route to the port — DNS rebinding — and the read tools would answer it.
 
 Every request is now checked before it reaches a handler, including `/mcp`:
 
-- The `Host` header has to name this server. The browser sends the name it
-  dialled, so a rebound request arrives saying `attacker.example` and is refused.
-  This applies to a loopback bind, which is the case being attacked; binding
-  elsewhere is an explicit choice whose clients dial by names this server cannot
-  predict.
-- An `Origin` is only accepted from this machine. A request without one did not
-  come from a browser; a cross-site one did, and is refused whatever `Host` it
-  used.
+- The `Host` header has to name this server: loopback, whatever `-addr` binds, or
+  a name given with `-allowed-host`. The browser sends the name it dialled, so a
+  rebound request arrives saying `attacker.example` and is refused. This applies
+  to every bind — rebinding works against a LAN address too, and choosing to
+  expose the session to a network is not choosing to expose it to every website.
+  A wildcard bind reached by hostname needs that name listed, because no client
+  sends `0.0.0.0`.
+- An `Origin` of any kind is refused. It means a browser is calling, and nothing
+  here is reachable from a page anyway: no response carries CORS headers, so even
+  a page served from this machine could not read one. Allowing some origins would
+  widen what a hostile page can set in motion — a read, a login window — without
+  enabling anything that works.
 
 Both refusals are `403`. This closes the drive-by case, not a hostile program
 already running as you — that program can send whatever headers it likes, and the

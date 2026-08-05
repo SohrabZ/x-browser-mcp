@@ -1,6 +1,8 @@
 package read
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -136,5 +138,38 @@ func TestReaderInvalidateDropsCachedResults(t *testing.T) {
 
 	if _, ok := r.cache.get("home:20"); ok {
 		t.Fatal("a write invalidated the cache; the stale result is still being served")
+	}
+}
+
+// A read that broke must not be reported as a read that found nothing. The two
+// look identical at the end of the collect loop -- no posts either way -- and
+// answering "no posts found" for the first sends the caller looking for a post
+// that may well exist, while hiding the fault that stopped it being found.
+func TestAReadThatBrokeIsNotReportedAsEmpty(t *testing.T) {
+	broke := errors.New("cdp connection closed")
+
+	cases := []struct {
+		name    string
+		ctxErr  error
+		failed  error
+		wantErr error
+		absent  bool
+	}{
+		{name: "genuinely empty", absent: true},
+		{name: "something broke", failed: broke, wantErr: broke},
+		{name: "budget ran out", ctxErr: context.DeadlineExceeded, wantErr: context.DeadlineExceeded},
+		{name: "both, deadline wins", ctxErr: context.DeadlineExceeded, failed: broke, wantErr: context.DeadlineExceeded},
+	}
+
+	for _, c := range cases {
+		got := cameBackEmpty(c.ctxErr, c.failed)
+
+		var missing *NotFoundError
+		if absent := errors.As(got, &missing); absent != c.absent {
+			t.Errorf("%s: classified as not-found=%v, want %v (%v)", c.name, absent, c.absent, got)
+		}
+		if c.wantErr != nil && !errors.Is(got, c.wantErr) {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.wantErr)
+		}
 	}
 }

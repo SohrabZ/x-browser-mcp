@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -32,9 +31,11 @@ type Deps struct {
 	MCP    *mcp.Server
 	Log    *slog.Logger
 
-	// ListenAddr is the address the server was told to bind. The handler needs
-	// it to know which Host names itself; see guard.
-	ListenAddr string
+	// ListenAddr is the address the server was told to bind, and AllowedHosts
+	// any further names it answers to. The handler needs them to know which Host
+	// names itself; see guard.
+	ListenAddr   string
+	AllowedHosts []string
 }
 
 // maxBody caps request bodies. The endpoints take a handful of small fields, so
@@ -134,7 +135,7 @@ func Handler(deps Deps) http.Handler {
 		mux.Handle("/mcp/", handler)
 	}
 
-	return logging(deps.Log, guard(deps.ListenAddr, mux))
+	return logging(deps.Log, guard(deps.ListenAddr, deps.AllowedHosts, mux))
 }
 
 // guard rejects requests a web page could have made.
@@ -150,27 +151,40 @@ func Handler(deps Deps) http.Handler {
 // The Host check applies only to a loopback bind, which is the deployment being
 // attacked. An operator who bound elsewhere has clients that legitimately dial by
 // another name, and has already been warned that doing so exposes the session.
-func guard(listenAddr string, next http.Handler) http.Handler {
+func guard(listenAddr string, extra []string, next http.Handler) http.Handler {
 	allowed := map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true}
-	loopbackOnly := true
-	if host := hostOf(listenAddr); host != "" && !allowed[host] {
+	if host := hostOf(listenAddr); !wildcard(host) {
 		allowed[host] = true
-		loopbackOnly = false
+	}
+	for _, h := range extra {
+		if host := hostOf(h); host != "" {
+			allowed[host] = true
+		}
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// A client that is not a browser sends no Origin. One that does is a
-		// page, and only a page served from this machine has any business here.
-		if origin := r.Header.Get("Origin"); origin != "" && !allowed[originHost(origin)] {
+		// Any Origin at all means a browser is calling, and nothing here is
+		// reachable from a page: no response carries CORS headers, so even a page
+		// served from this machine could not read one. Allowing some origins
+		// would widen what a hostile page can set in motion -- a read, a login
+		// window -- without enabling anything that works.
+		if r.Header.Get("Origin") != "" {
 			writeJSON(w, http.StatusForbidden, errorBody{Error: "cross-origin request refused"})
 			return
 		}
-		if loopbackOnly && !allowed[hostOf(r.Host)] {
+		if !allowed[hostOf(r.Host)] {
 			writeJSON(w, http.StatusForbidden, errorBody{Error: "refused: the request does not address this server by name"})
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// wildcard reports whether a bind address names no particular host. There is
+// nothing to add to the list for one: no client sends "0.0.0.0" as a Host, so
+// reaching a wildcard bind by a name of its own needs -allowed-host.
+func wildcard(host string) bool {
+	return host == "" || host == "0.0.0.0" || host == "::"
 }
 
 // hostOf reduces an address or a Host header to the name it means.
@@ -186,16 +200,6 @@ func hostOf(addr string) string {
 	}
 	host = strings.Trim(host, "[]")
 	return strings.ToLower(strings.TrimSuffix(host, "."))
-}
-
-// originHost is the host an Origin names, or "" if it names none -- which is what
-// a sandboxed or file-served page sends, and is not this server either way.
-func originHost(origin string) string {
-	u, err := url.Parse(origin)
-	if err != nil {
-		return ""
-	}
-	return hostOf(u.Host)
 }
 
 // Server wraps the handler with timeouts.
@@ -316,6 +320,9 @@ func writeErr(w http.ResponseWriter, log *slog.Logger, err error) {
 	status := http.StatusInternalServerError
 	message := "internal error"
 
+	// What goes back is the message of the error that was recognised, never the
+	// one it arrived wrapped in. A wrapper is where the internals are: a profile
+	// already in use carries the path of the lock that says so.
 	var (
 		exhausted *limit.ExhaustedError
 		badInput  *read.InvalidError
@@ -323,18 +330,19 @@ func writeErr(w http.ResponseWriter, log *slog.Logger, err error) {
 	)
 	switch {
 	case errors.Is(err, auth.ErrLoginRequired):
-		status, message = http.StatusPreconditionFailed, err.Error()
+		status, message = http.StatusPreconditionFailed, auth.ErrLoginRequired.Error()
 	case errors.As(err, &exhausted):
-		status, message = http.StatusTooManyRequests, err.Error()
+		status, message = http.StatusTooManyRequests, exhausted.Error()
 	case errors.As(err, &badInput):
-		status, message = http.StatusBadRequest, err.Error()
+		status, message = http.StatusBadRequest, badInput.Error()
 	case errors.As(err, &missing):
-		status, message = http.StatusNotFound, err.Error()
-	case errors.Is(err, browser.ErrProfileInUse), errors.Is(err, pool.ErrClosed):
-		// Temporary and self-explanatory: a login or a write holds the profile,
-		// or the server is shutting down. Neither is worth hiding, and both are
-		// worth retrying.
-		status, message = http.StatusServiceUnavailable, err.Error()
+		status, message = http.StatusNotFound, missing.Error()
+	case errors.Is(err, browser.ErrProfileInUse):
+		// Temporary and self-explanatory: a login or a write holds the profile.
+		// Worth saying, and worth retrying.
+		status, message = http.StatusServiceUnavailable, browser.ErrProfileInUse.Error()
+	case errors.Is(err, pool.ErrClosed):
+		status, message = http.StatusServiceUnavailable, pool.ErrClosed.Error()
 	case errors.Is(err, context.DeadlineExceeded):
 		status, message = http.StatusGatewayTimeout, "the read did not finish in time"
 	default:

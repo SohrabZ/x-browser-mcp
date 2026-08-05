@@ -444,11 +444,17 @@ func TestTheServersOwnNamesAreAccepted(t *testing.T) {
 	}
 }
 
-// A cross-site Origin means a page is calling, whatever Host it used.
-func TestACrossOriginRequestIsRefused(t *testing.T) {
+// Any Origin means a browser is calling, whatever Host it used. None of them are
+// accepted: no response here carries CORS headers, so even a page served from
+// this machine could not read one, and allowing it would only widen what a
+// hostile page can set in motion.
+func TestARequestFromAnyBrowserPageIsRefused(t *testing.T) {
 	h := Handler(Deps{ListenAddr: "127.0.0.1:18110"})
 
-	for _, origin := range []string{"https://evil.example", "http://attacker.test:3000", "null"} {
+	for _, origin := range []string{
+		"https://evil.example", "http://attacker.test:3000", "null",
+		"http://localhost:3000", "http://127.0.0.1:18110",
+	} {
 		r := newRequest(http.MethodGet, "/health", nil)
 		r.Header.Set("Origin", origin)
 
@@ -460,22 +466,15 @@ func TestACrossOriginRequestIsRefused(t *testing.T) {
 	}
 }
 
-// A page served from this machine is allowed, which is what a local UI would be.
-// A client that is not a browser sends no Origin at all.
-func TestALocalOriginAndNoOriginAreAccepted(t *testing.T) {
+// A client that is not a browser sends no Origin, which is every client this
+// server actually has.
+func TestAClientThatIsNotABrowserIsAccepted(t *testing.T) {
 	h := Handler(Deps{ListenAddr: "127.0.0.1:18110"})
 
-	for _, origin := range []string{"", "http://localhost:3000", "http://127.0.0.1:18110"} {
-		r := newRequest(http.MethodGet, "/health", nil)
-		if origin != "" {
-			r.Header.Set("Origin", origin)
-		}
-
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, r)
-		if rec.Code != http.StatusOK {
-			t.Errorf("Origin %q: got %d, want 200", origin, rec.Code)
-		}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("got %d, want 200", rec.Code)
 	}
 }
 
@@ -494,26 +493,71 @@ func TestTheGuardCoversTheMCPEndpoint(t *testing.T) {
 	}
 }
 
-// Binding beyond loopback is an explicit choice the operator is warned about,
-// and its clients dial by a name this server cannot predict. The Origin check
-// still applies; the Host check would only break them.
-func TestANonLoopbackBindStillChecksOriginButNotHost(t *testing.T) {
+// Binding beyond loopback must not drop the Host check. Rebinding works just as
+// well against a LAN address, and choosing to expose the session to a network is
+// not choosing to expose it to every website.
+func TestANonLoopbackBindStillChecksHost(t *testing.T) {
 	h := Handler(Deps{ListenAddr: "0.0.0.0:18110"})
 
 	r := httptest.NewRequest(http.MethodGet, "/health", nil)
-	r.Host = "my-machine.local:18110"
+	r.Host = "evil.example:18110" // rebound to the victim's LAN address
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("got %d, want 403 for a rebound name on a wildcard bind", rec.Code)
+	}
+}
+
+// Which is why a name of its own has to be given rather than guessed: no client
+// sends "0.0.0.0", so a LAN deployment reached by hostname names it explicitly.
+func TestAnAllowedHostIsAccepted(t *testing.T) {
+	h := Handler(Deps{ListenAddr: "0.0.0.0:18110", AllowedHosts: []string{"my-machine.local"}})
+
+	for host, want := range map[string]int{
+		"my-machine.local:18110": http.StatusOK,
+		"MY-MACHINE.LOCAL":       http.StatusOK,
+		"127.0.0.1:18110":        http.StatusOK,
+		"evil.example:18110":     http.StatusForbidden,
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/health", nil)
+		r.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code != want {
+			t.Errorf("Host %q: got %d, want %d", host, rec.Code, want)
+		}
+	}
+}
+
+// A bind to one address answers to that address without being told.
+func TestTheBoundAddressIsAccepted(t *testing.T) {
+	h := Handler(Deps{ListenAddr: "192.168.1.5:18110"})
+
+	r := httptest.NewRequest(http.MethodGet, "/health", nil)
+	r.Host = "192.168.1.5:18110"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, r)
 	if rec.Code != http.StatusOK {
-		t.Errorf("a LAN client got %d, want 200", rec.Code)
+		t.Errorf("got %d, want 200 for the address it bound", rec.Code)
 	}
+}
 
-	r = httptest.NewRequest(http.MethodGet, "/health", nil)
-	r.Host = "my-machine.local:18110"
-	r.Header.Set("Origin", "https://evil.example")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, r)
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("a cross-origin page got %d, want 403", rec.Code)
+// A recognised failure reports its own message, not the one it arrived wrapped
+// in -- that is where the internals are. A profile already in use carries the
+// path of the lock that says so.
+func TestAClassifiedFailureDoesNotLeakItsWrapper(t *testing.T) {
+	secret := "/Users/someone/.x-browser-mcp/profile/SingletonLock"
+
+	for _, err := range []error{
+		fmt.Errorf("%w (%s)", browser.ErrProfileInUse, secret),
+		fmt.Errorf("read list: %w", &read.NotFoundError{Reason: "no posts found"}),
+		fmt.Errorf("open %s: %w", secret, pool.ErrClosed),
+	} {
+		rec := httptest.NewRecorder()
+		writeErr(rec, nil, err)
+
+		if body := rec.Body.String(); strings.Contains(body, secret) {
+			t.Errorf("the response carried a local path: %s", body)
+		}
 	}
 }

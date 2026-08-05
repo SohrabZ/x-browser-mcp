@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -45,6 +46,14 @@ func run() error {
 	flag.DurationVar(&cfg.FetchTimeout, "fetch-timeout", cfg.FetchTimeout, "time budget for a single read")
 	flag.DurationVar(&cfg.LoginTimeout, "login-timeout", cfg.LoginTimeout, "how long an interactive login may stay open")
 	flag.DurationVar(&cfg.WriteTimeout, "write-timeout", cfg.WriteTimeout, "time budget for a single write, including confirming it took effect")
+	flag.Func("allowed-host", "extra Host name the server answers to (repeatable); needed for a non-loopback bind reached by name", func(v string) error {
+		for _, host := range strings.Split(v, ",") {
+			if host = strings.TrimSpace(host); host != "" {
+				cfg.AllowedHosts = append(cfg.AllowedHosts, host)
+			}
+		}
+		return nil
+	})
 	flag.DurationVar(&cfg.BrowserIdle, "browser-idle", cfg.BrowserIdle, "how long a browser stays warm between reads (0 disables warming)")
 
 	// Pacing is exposed because the right values depend on how hard you drive
@@ -144,7 +153,8 @@ func run() error {
 	})
 
 	handler := httpapi.Handler(httpapi.Deps{
-		ListenAddr: cfg.ListenAddr,
+		ListenAddr:   cfg.ListenAddr,
+		AllowedHosts: cfg.AllowedHosts,
 
 		Auth:   authManager,
 		Reader: reader,

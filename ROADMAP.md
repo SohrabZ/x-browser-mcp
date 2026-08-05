@@ -18,8 +18,8 @@ audit log.
 they were: a request that was wrong, a surface X does not have, a profile held by
 a login or a write, or a read that ran out of time. Only a fault the caller can
 do nothing about is hidden behind `internal error`. A request has to address the
-server by name and carry no cross-site `Origin`, which keeps a page in an
-ordinary browser off the port.
+server by name and carry no `Origin`, which keeps a page in an ordinary browser
+off the port.
 
 **A warm browser** — reads share one Chrome instead of launching and quitting
 per request, which cut the median uncached read from 3.58s to 2.02s. It is

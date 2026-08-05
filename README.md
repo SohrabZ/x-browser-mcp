@@ -281,6 +281,7 @@ act as you.
 | `-allow-writes`   | `false`             | enable write tools                   |
 | `-fetch-timeout`  | `45s`               | budget for one read                  |
 | `-login-timeout`  | `5m`                | how long a login window stays open   |
+| `-allowed-host`   | none                | extra `Host` name to answer to (repeatable) |
 | `-write-timeout`  | `2m`                | budget for one write, incl. confirming it |
 | `-browser-idle`   | `3m`                | how long a browser stays warm (0 = off) |
 | `-read-interval`  | `3s`                | minimum gap between live reads       |
@@ -293,10 +294,11 @@ act as you.
 
 `X_BROWSER_MCP_CHROME` overrides Chrome detection.
 
-Requests have to address the server by name — `localhost`, `127.0.0.1`, or
-whatever `-addr` binds — and anything carrying a cross-site `Origin` is refused
-with `403`. That is what keeps a page you visit in an ordinary browser from
-reaching the port; see [SECURITY.md](SECURITY.md).
+Requests have to address the server by name — `localhost`, `127.0.0.1`, whatever
+`-addr` binds, or a name given with `-allowed-host` — and anything carrying an
+`Origin` at all is refused with `403`, since that means a browser is calling. That
+is what keeps a page you visit from reaching the port; see
+[SECURITY.md](SECURITY.md).
 
 ## Notes
 
