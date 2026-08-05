@@ -138,16 +138,25 @@ func (w *Writer) Repost(ctx context.Context, handle, postID, confirm string) err
 		if err := p.Goto(target); err != nil {
 			return err
 		}
-		if err := click(p, xui.SelRepostButton); err != nil {
+		if p.Has(xui.SelUnrepostButton, 2*time.Second) {
+			return nil // already reposted
+		}
+		if err := press(p, xui.SelRepostButton); err != nil {
 			return err
 		}
-		return click(p, xui.SelRepostConfirm)
+		if err := press(p, xui.SelRepostConfirm); err != nil {
+			return err
+		}
+		if !p.Has(xui.SelUnrepostButton, engagementWait) {
+			return errors.New("repost did not take effect: X still shows the action as available")
+		}
+		return confirmApplied(p, target, xui.SelUnrepostButton, ActionRepost)
 	})
 }
 
 // Bookmark saves a post.
 func (w *Writer) Bookmark(ctx context.Context, handle, postID, confirm string) error {
-	return w.tap(ctx, ActionBookmark, handle, postID, confirm, xui.SelBookmarkAdd, "")
+	return w.tap(ctx, ActionBookmark, handle, postID, confirm, xui.SelBookmarkAdd, xui.SelBookmarkRemove)
 }
 
 // tap is the shared shape for single-button actions.
@@ -169,9 +178,51 @@ func (w *Writer) tap(ctx context.Context, action, handle, postID, confirm, butto
 		if alreadyDone != "" && p.Has(alreadyDone, 2*time.Second) {
 			return nil
 		}
-		return click(p, button)
+		// Start watching for network activity before pressing, so the request
+		// X makes for this action can be waited on rather than raced.
+		settled := p.Rod().WaitRequestIdle(time.Second, nil, nil, nil)
+
+		if err := press(p, button); err != nil {
+			return err
+		}
+		// A click is not the action. X applies these over the network and swaps
+		// the control when it lands, so a click that was accepted locally and
+		// never reached X looks identical to one that worked -- and the browser
+		// is torn down immediately after this returns, which is enough to lose
+		// a request still in flight. Wait for the control to flip.
+		if alreadyDone == "" {
+			return nil
+		}
+		if !p.Has(alreadyDone, engagementWait) {
+			return fmt.Errorf("%s did not take effect: X still shows the action as available", action)
+		}
+		// The control flipping is not the action either. X updates it
+		// optimistically, before its request has completed, so anything that
+		// disturbs the page at that moment -- tearing the browser down, or
+		// navigating, including the reload below -- cancels the request and
+		// leaves a page that looked right and changed nothing.
+		settled()
+
+		return confirmApplied(p, target, alreadyDone, action)
 	})
 }
+
+// confirmApplied reloads the post and checks the action survived, which is the
+// only check that distinguishes what X has recorded from what its page is
+// merely showing.
+func confirmApplied(p *browser.Page, target, alreadyDone, action string) error {
+	if err := p.Goto(target); err != nil {
+		return fmt.Errorf("confirm %s: %w", action, err)
+	}
+	if !p.Has(alreadyDone, engagementWait) {
+		return fmt.Errorf("%s did not stick: X shows the action as still available after reloading the post", action)
+	}
+	return nil
+}
+
+// engagementWait bounds how long to wait for X to apply a like, repost or
+// bookmark. It is a ceiling: the check returns as soon as the control flips.
+const engagementWait = 10 * time.Second
 
 // do runs the gate, budget and auth checks, performs the action, and records
 // the outcome whichever way it goes.
@@ -307,10 +358,80 @@ func compose(p *browser.Page, text string) error {
 	if err != nil {
 		return fmt.Errorf("compose box not found: %w", err)
 	}
+
+	// Click before typing. A reply composer sits collapsed until it is focused,
+	// and text entered into an unfocused one never reaches X's editor: the box
+	// appears to fill, the submit button stays disabled, and the click that
+	// follows lands on a control that cannot be pressed.
+	if err := box.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return fmt.Errorf("focus compose box: %w", err)
+	}
 	if err := box.Input(text); err != nil {
 		return fmt.Errorf("enter post text: %w", err)
 	}
+
+	// Wait for X to accept the text rather than assuming it did. The submit
+	// button is disabled until then, so this doubles as confirmation that the
+	// composer actually holds what we typed.
+	if err := waitEnabled(p, xui.SelComposeButton, composeWait); err != nil {
+		return err
+	}
 	return click(p, xui.SelComposeButton)
+}
+
+// composeWait bounds how long to wait for the submit control to become usable.
+//
+// It is a ceiling, not a pause: waitEnabled returns as soon as the button is
+// clickable, which is the normal case and costs a single poll. The bound only
+// runs out when the composer never accepted the text, and failing quickly there
+// is better than making the caller wait for a write that was never going to go.
+const composeWait = 5 * time.Second
+
+// waitEnabled blocks until the control can actually be clicked.
+//
+// X disables its submit buttons with pointer-events rather than the disabled
+// attribute, so a plain click reports a confusing failure about pointer-events
+// instead of "there is nothing to post yet".
+func waitEnabled(p *browser.Page, selector string, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	for {
+		el, err := p.Rod().Element(selector)
+		if err == nil {
+			usable, evalErr := el.Eval(`() => {
+				const s = getComputedStyle(this);
+				return s.pointerEvents !== 'none' &&
+					this.getAttribute('aria-disabled') !== 'true' &&
+					!this.disabled;
+			}`)
+			if evalErr == nil && usable.Value.Bool() {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the post control never became usable within %s; the composer may not have accepted the text", budget)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// press activates a control by dispatching a DOM click.
+//
+// X ignores synthesized mouse events on its engagement controls: a like click
+// delivered through CDP is accepted by the page, reports no error, and does
+// nothing at all -- the button never flips and no request is made. A direct
+// click on the element does work, and persists.
+//
+// Composing is left on the mouse-event path, which X does honour there and
+// which is closer to what a person does.
+func press(p *browser.Page, selector string) error {
+	el, err := p.Rod().Element(selector)
+	if err != nil {
+		return fmt.Errorf("control not found (%s): %w", selector, err)
+	}
+	if _, err := el.Eval(`() => this.click()`); err != nil {
+		return fmt.Errorf("press %s: %w", selector, err)
+	}
+	return nil
 }
 
 func click(p *browser.Page, selector string) error {

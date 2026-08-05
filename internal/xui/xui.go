@@ -96,14 +96,16 @@ const (
 	SelAccountMenu = `[data-testid="SideNav_AccountSwitcher_Button"]`
 	SelProfileLink = `[data-testid="AppTabBar_Profile_Link"]`
 
-	SelComposeBox    = `[data-testid="tweetTextarea_0"]`
-	SelComposeButton = `[data-testid="tweetButtonInline"], [data-testid="tweetButton"]`
-	SelReplyButton   = `[data-testid="reply"]`
-	SelLikeButton    = `[data-testid="like"]`
-	SelUnlikeButton  = `[data-testid="unlike"]`
-	SelRepostButton  = `[data-testid="retweet"]`
-	SelRepostConfirm = `[data-testid="retweetConfirm"]`
-	SelBookmarkAdd   = `[data-testid="bookmark"]`
+	SelComposeBox     = `[data-testid="tweetTextarea_0"]`
+	SelComposeButton  = `[data-testid="tweetButtonInline"], [data-testid="tweetButton"]`
+	SelReplyButton    = `[data-testid="reply"]`
+	SelLikeButton     = `[data-testid="like"]`
+	SelUnlikeButton   = `[data-testid="unlike"]`
+	SelRepostButton   = `[data-testid="retweet"]`
+	SelRepostConfirm  = `[data-testid="retweetConfirm"]`
+	SelUnrepostButton = `[data-testid="unretweet"]`
+	SelBookmarkAdd    = `[data-testid="bookmark"]`
+	SelBookmarkRemove = `[data-testid="removeBookmark"]`
 )
 
 // SignedInCookies reports whether the browser holds the pair of cookies X sets
