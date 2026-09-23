@@ -254,8 +254,8 @@ func (r *Reader) FromURL(ctx context.Context, raw string, n int) (Resolved, erro
 
 // Thread reads a post together with the replies shown beneath it.
 //
-// X renders the root and its replies as the same kind of article, so the first
-// post on the page is the root and the rest are replies.
+// X may render ancestors above the requested post. Match its ID rather than
+// treating the first article as the root, and leave ancestors out of replies.
 func (r *Reader) Thread(ctx context.Context, handle, postID string, n int) (model.Thread, error) {
 	h := xui.NormalizeHandle(handle)
 	if h == "" || postID == "" {
@@ -269,7 +269,14 @@ func (r *Reader) Thread(ctx context.Context, handle, postID string, n int) (mode
 	if len(res.Posts) == 0 {
 		return model.Thread{}, notFound("no posts found for that thread; it may be deleted, private, or the id may be wrong")
 	}
-	return model.Thread{Root: res.Posts[0], Replies: res.Posts[1:]}, nil
+	for i, post := range res.Posts {
+		if post.ID == postID {
+			return model.Thread{Root: post, Replies: res.Posts[i+1:]}, nil
+		}
+	}
+	// A partial collection may contain only ancestors. Returning one of those
+	// as the requested post would silently attribute the wrong text to the URL.
+	return model.Thread{}, notFound("the requested post was not found in the collected thread; X may not have rendered it or the read limit may have been reached")
 }
 
 // timeline is the shared path behind every surface: cache, budget, auth, then
