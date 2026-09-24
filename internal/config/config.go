@@ -27,6 +27,12 @@ type Config struct {
 	// never registered, so a model cannot see or call them.
 	AllowWrites bool
 
+	// AutoApprove lets every write through without an approval code. It gives
+	// up the defence the codes are, since any post the agent reads can then make
+	// it write as the account, so it is off unless asked for and means nothing
+	// without AllowWrites.
+	AutoApprove bool
+
 	// StatusTTL caches a login verdict. Each uncached check drives a real
 	// browser at X, so checking more often makes losing the session likelier.
 	StatusTTL time.Duration
@@ -84,6 +90,7 @@ func Default() Config {
 		ChromePath:  FindChrome(),
 		Headless:    true,
 		AllowWrites: false,
+		AutoApprove: false,
 
 		StatusTTL: 5 * time.Minute,
 		ResultTTL: 5 * time.Minute,
@@ -177,6 +184,11 @@ func (c Config) Validate() error {
 	}
 	if c.WriteTimeout <= 0 {
 		return fmt.Errorf("write timeout must be positive, got %s", c.WriteTimeout)
+	}
+	// Refused rather than ignored: an operator who asked for approval to be
+	// skipped and got writes off instead would not find out until a write failed.
+	if c.AutoApprove && !c.AllowWrites {
+		return fmt.Errorf("-auto-approve needs -allow-writes")
 	}
 	if err := c.ReadPace.validate("read"); err != nil {
 		return err

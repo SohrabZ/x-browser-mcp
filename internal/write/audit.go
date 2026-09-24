@@ -30,9 +30,11 @@ type Record struct {
 	Target  string    `json:"target,omitempty"`
 	Excerpt string    `json:"excerpt,omitempty"`
 	// Created is the id X gave the post or reply the write published.
-	Created string  `json:"created,omitempty"`
-	Outcome Outcome `json:"outcome"`
-	Reason  string  `json:"reason,omitempty"`
+	Created string `json:"created,omitempty"`
+	// AutoApproved marks a write that went ahead without an approval code.
+	AutoApproved bool    `json:"auto_approved,omitempty"`
+	Outcome      Outcome `json:"outcome"`
+	Reason       string  `json:"reason,omitempty"`
 }
 
 // Auditor appends write attempts to a file.

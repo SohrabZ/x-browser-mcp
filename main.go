@@ -43,6 +43,7 @@ func run() error {
 	flag.StringVar(&cfg.ProfileName, "profile", cfg.ProfileName, "Chrome profile directory inside the profile dir")
 	flag.BoolVar(&cfg.Headless, "headless", cfg.Headless, "run read browsers headless")
 	flag.BoolVar(&cfg.AllowWrites, "allow-writes", cfg.AllowWrites, "enable the write tools (post, reply, like, repost, bookmark, unbookmark)")
+	flag.BoolVar(&cfg.AutoApprove, "auto-approve", cfg.AutoApprove, "let every write through without an approval code (needs -allow-writes); any post your agent reads can then make it write as you")
 	flag.DurationVar(&cfg.FetchTimeout, "fetch-timeout", cfg.FetchTimeout, "time budget for a single read")
 	flag.DurationVar(&cfg.LoginTimeout, "login-timeout", cfg.LoginTimeout, "how long an interactive login may stay open")
 	flag.DurationVar(&cfg.WriteTimeout, "write-timeout", cfg.WriteTimeout, "time budget for a single write, including confirming it took effect")
@@ -137,7 +138,7 @@ func run() error {
 
 	// Approvals go to the terminal the server was started from: the one place a
 	// person reads that no model does.
-	gate := write.NewGate(cfg.AllowWrites, os.Stderr)
+	gate := write.NewGate(writeMode(cfg), os.Stderr)
 	writer := write.New(write.Options{
 		Open:    open,
 		Auth:    authManager,
@@ -171,7 +172,8 @@ func run() error {
 		log.Warn("listening beyond loopback; the API is unauthenticated and exposes your X session",
 			"addr", cfg.ListenAddr)
 	}
-	log.Info("x-browser-mcp listening", "addr", cfg.ListenAddr, "profile", cfg.ProfileDir(), "writes", cfg.AllowWrites)
+	log.Info("x-browser-mcp listening", "addr", cfg.ListenAddr, "profile", cfg.ProfileDir(),
+		"writes", cfg.AllowWrites, "auto_approve", cfg.AutoApprove)
 
 	return serve(srv, log)
 }
@@ -198,6 +200,18 @@ func serve(srv *http.Server, log *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(ctx)
+}
+
+// writeMode is how the configuration says writes are authorised.
+func writeMode(cfg config.Config) write.Mode {
+	switch {
+	case !cfg.AllowWrites:
+		return write.WritesOff
+	case cfg.AutoApprove:
+		return write.WritesAutoApproved
+	default:
+		return write.WritesApproved
+	}
 }
 
 // pace converts a configured pace into limiter parameters.

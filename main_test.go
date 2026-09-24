@@ -10,6 +10,7 @@ import (
 
 	"github.com/SohrabZ/x-browser-mcp/internal/browser"
 	"github.com/SohrabZ/x-browser-mcp/internal/config"
+	"github.com/SohrabZ/x-browser-mcp/internal/write"
 )
 
 // The sign-in window is the one Chrome this project starts without going
@@ -43,5 +44,24 @@ func TestLoginWindowRefusesAProfileSomeoneElseHolds(t *testing.T) {
 			_ = cmd.Process.Kill()
 		}
 		t.Fatalf("got %v, want ErrProfileInUse", err)
+	}
+}
+
+// -auto-approve means something only with -allow-writes, and Validate refuses it
+// alone; this is what each combination that gets past Validate turns into.
+func TestWriteModeFollowsTheFlags(t *testing.T) {
+	for _, c := range []struct {
+		allow, auto bool
+		want        write.Mode
+	}{
+		{false, false, write.WritesOff},
+		{true, false, write.WritesApproved},
+		{true, true, write.WritesAutoApproved},
+	} {
+		cfg := config.Default()
+		cfg.AllowWrites, cfg.AutoApprove = c.allow, c.auto
+		if got := writeMode(cfg); got != c.want {
+			t.Errorf("allow-writes=%v auto-approve=%v: mode %v, want %v", c.allow, c.auto, got, c.want)
+		}
 	}
 }

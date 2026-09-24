@@ -70,7 +70,9 @@ import each other.
   that is not there cannot be reached by anything reading injected instructions.
   Each call also needs an approval code, printed in the server's terminal next
   to the one action it approves. A code works once, so one the user handed over
-  cannot be spent by a post on something else.
+  cannot be spent by a post on something else. `-auto-approve` turns the codes
+  off for an operator who accepts that risk. Every write it lets through is
+  still printed, paced and marked `auto_approved` in the log.
 - **Post text is untrusted input aimed at your agent.** The MCP tools prefix every
   batch with a notice saying so, and put the same notice in a `notice` field of
   the JSON copy the SDK sends as `structuredContent`, since a client may give the

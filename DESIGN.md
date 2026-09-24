@@ -145,6 +145,9 @@ against user error.
    terminal. The code approves that action once, for five minutes. A model
    cannot invent a code it has never seen, and a code the user gave for one
    action cannot approve another, so a post in the same context cannot spend it.
+   An operator can give this up with `-auto-approve`. Every write then goes
+   ahead without a code, and the server prints it and marks it
+   `auto_approved` in the audit log.
 3. **Separate, tight budget.** `limit` tracks writes independently of reads,
    defaulting to a handful per hour.
 4. **Append-only audit log.** Every attempt — allowed, denied or failed —

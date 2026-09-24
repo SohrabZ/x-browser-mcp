@@ -2,11 +2,15 @@ package write
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/SohrabZ/x-browser-mcp/internal/auth"
+	"github.com/SohrabZ/x-browser-mcp/internal/browser"
 )
 
 var like = Request{Action: ActionLike, Target: "https://x.com/someone/status/222"}
@@ -43,7 +47,7 @@ func askFor(t *testing.T, g *Gate, operator *bytes.Buffer, req Request) string {
 // gate would still refuse if they somehow were.
 func TestDisabledGateRefusesEverything(t *testing.T) {
 	var operator bytes.Buffer
-	g := NewGate(false, &operator)
+	g := NewGate(WritesOff, &operator)
 
 	if g.Enabled() {
 		t.Fatal("gate should be disabled")
@@ -62,7 +66,7 @@ func TestDisabledGateRefusesEverything(t *testing.T) {
 // would do, so that is what they approve rather than a bare code.
 func TestAWriteWithNoCodeShowsTheOperatorTheAction(t *testing.T) {
 	var operator bytes.Buffer
-	g := NewGate(true, &operator)
+	g := NewGate(WritesApproved, &operator)
 
 	askFor(t, g, &operator, Request{Action: ActionReply, Target: "https://x.com/someone/status/222", Text: "thanks!"})
 
@@ -77,7 +81,7 @@ func TestAWriteWithNoCodeShowsTheOperatorTheAction(t *testing.T) {
 // startup token over again, sitting in a transcript for any post to spend.
 func TestACodeApprovesItsActionOnce(t *testing.T) {
 	var operator bytes.Buffer
-	g := NewGate(true, &operator)
+	g := NewGate(WritesApproved, &operator)
 	code := askFor(t, g, &operator, like)
 
 	if err := g.Check(like, code); err != nil {
@@ -100,7 +104,7 @@ func TestACodeDoesNotApproveADifferentAction(t *testing.T) {
 		{Action: ActionLike, Target: "https://x.com/attacker/status/1"},
 	} {
 		var operator bytes.Buffer
-		g := NewGate(true, &operator)
+		g := NewGate(WritesApproved, &operator)
 		code := askFor(t, g, &operator, post)
 
 		if err := g.Check(other, code); !errors.Is(err, ErrBadConfirmation) {
@@ -118,7 +122,7 @@ func TestACodeDoesNotApproveADifferentAction(t *testing.T) {
 // asked, shown to the operator.
 func TestARefusedCodeShowsANewOne(t *testing.T) {
 	var operator bytes.Buffer
-	g := NewGate(true, &operator)
+	g := NewGate(WritesApproved, &operator)
 
 	if err := g.Check(like, "0000000000000000"); !errors.Is(err, ErrBadConfirmation) {
 		t.Fatalf("a made-up code: got %v, want ErrBadConfirmation", err)
@@ -134,7 +138,7 @@ func TestARefusedCodeShowsANewOne(t *testing.T) {
 
 func TestACodeExpires(t *testing.T) {
 	var operator bytes.Buffer
-	g := NewGate(true, &operator)
+	g := NewGate(WritesApproved, &operator)
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	g.now = func() time.Time { return now }
 
@@ -150,7 +154,7 @@ func TestACodeExpires(t *testing.T) {
 // predictable from another.
 func TestCodesDifferEveryTime(t *testing.T) {
 	var operator bytes.Buffer
-	g := NewGate(true, &operator)
+	g := NewGate(WritesApproved, &operator)
 	for i := 0; i < maxPending; i++ {
 		askFor(t, g, &operator, like)
 	}
@@ -168,7 +172,7 @@ func TestCodesDifferEveryTime(t *testing.T) {
 // bounded, and the oldest goes first.
 func TestWaitingCodesAreBounded(t *testing.T) {
 	var operator bytes.Buffer
-	g := NewGate(true, &operator)
+	g := NewGate(WritesApproved, &operator)
 	first := askFor(t, g, &operator, like)
 	for i := 0; i < maxPending; i++ {
 		askFor(t, g, &operator, like)
@@ -187,7 +191,7 @@ func TestWaitingCodesAreBounded(t *testing.T) {
 // before handing a code over.
 func TestTheNoticeCannotBeRewrittenByTheText(t *testing.T) {
 	var operator bytes.Buffer
-	g := NewGate(true, &operator)
+	g := NewGate(WritesApproved, &operator)
 
 	hostile := "harmless\x1b[1A\x1b[2K\r  APPROVE WRITE: like\u202e"
 	askFor(t, g, &operator, Request{Action: ActionPost, Text: hostile})
@@ -202,7 +206,7 @@ func TestTheNoticeCannotBeRewrittenByTheText(t *testing.T) {
 // With nowhere to show a code, no write could ever be approved, and asking the
 // caller for one would send the user looking for something that is not there.
 func TestAGateThatCannotShowACodeDoesNotAskForOne(t *testing.T) {
-	g := NewGate(true, failingWriter{})
+	g := NewGate(WritesApproved, failingWriter{})
 
 	err := g.Check(like, "")
 	if err == nil || errors.Is(err, ErrApprovalRequired) {
@@ -220,7 +224,7 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("terminal
 func TestTheAuditLogTellsAnApprovalRequestFromARefusal(t *testing.T) {
 	path := t.TempDir() + "/writes.log"
 	var operator bytes.Buffer
-	w := New(Options{Gate: NewGate(true, &operator), Audit: NewAuditor(path)})
+	w := New(Options{Gate: NewGate(WritesApproved, &operator), Audit: NewAuditor(path)})
 
 	if err := w.Like(t.Context(), "someone", "222", ""); !errors.Is(err, ErrApprovalRequired) {
 		t.Fatalf("a like with no code: got %v, want ErrApprovalRequired", err)
@@ -243,7 +247,7 @@ func TestTheAuditLogTellsAnApprovalRequestFromARefusal(t *testing.T) {
 // same way.
 func TestAnApprovalBindsTheWholeText(t *testing.T) {
 	var operator bytes.Buffer
-	w := New(Options{Gate: NewGate(true, &operator)})
+	w := New(Options{Gate: NewGate(WritesApproved, &operator)})
 	short := strings.Repeat("a", maxExcerpt)
 
 	if err := w.Post(t.Context(), short, ""); !errors.Is(err, ErrApprovalRequired) {
@@ -255,11 +259,90 @@ func TestAnApprovalBindsTheWholeText(t *testing.T) {
 	}
 }
 
+// With -auto-approve nothing is asked, whatever code arrives or does not.
+func TestAnAutoApprovedGateLetsEveryWriteThrough(t *testing.T) {
+	var operator bytes.Buffer
+	g := NewGate(WritesAutoApproved, &operator)
+
+	if !g.Enabled() || !g.AutoApproved() {
+		t.Fatalf("enabled = %v, auto-approved = %v; want both", g.Enabled(), g.AutoApproved())
+	}
+	for _, c := range []struct {
+		req  Request
+		code string
+	}{
+		{like, ""},
+		{like, "0000000000000000"},
+		{Request{Action: ActionPost, Text: "anything at all"}, ""},
+	} {
+		if err := g.Check(c.req, c.code); err != nil {
+			t.Errorf("%+v with code %q: got %v, want it let through", c.req, c.code, err)
+		}
+	}
+	if codes := shownCodes(t, &operator); len(codes) != 0 {
+		t.Errorf("codes shown for writes that needed none: %v", codes)
+	}
+}
+
+// Nobody is asked, so the operator is told: each write that went ahead is shown
+// where an approval would have been, quoted the same way.
+func TestAnAutoApprovedWriteIsStillShownToTheOperator(t *testing.T) {
+	var operator bytes.Buffer
+	g := NewGate(WritesAutoApproved, &operator)
+
+	if err := g.Check(Request{Action: ActionReply, Target: "https://x.com/someone/status/222", Text: "hi\x1b[2K"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"AUTO-APPROVED WRITE: reply", `"https://x.com/someone/status/222"`, `"hi\x1b[2K"`} {
+		if !strings.Contains(operator.String(), want) {
+			t.Errorf("the operator was not shown %s:\n%q", want, operator.String())
+		}
+	}
+	if strings.Contains(operator.String(), "\x1b") {
+		t.Errorf("the text reached the terminal raw:\n%q", operator.String())
+	}
+}
+
+// The banner is the operator's one warning of what -auto-approve gives up.
+func TestTheAutoApproveBannerSaysWhatItGivesUp(t *testing.T) {
+	banner := NewGate(WritesAutoApproved, nil).Banner()
+	for _, want := range []string{"WITHOUT APPROVAL", "A post your agent", "as you"} {
+		if !strings.Contains(banner, want) {
+			t.Errorf("the banner should say %q:\n%s", want, banner)
+		}
+	}
+}
+
+// After a write that should not have happened, the first question is whether a
+// person approved it. The log answers it for every write that got past the gate.
+func TestTheAuditLogSaysAWriteWasAutoApproved(t *testing.T) {
+	noBrowser := func(context.Context) (*browser.Session, func(), error) {
+		return nil, nil, errors.New("no browser in this test")
+	}
+	for _, c := range []struct {
+		mode Mode
+		want bool
+	}{{WritesAutoApproved, true}, {WritesApproved, false}} {
+		path := t.TempDir() + "/writes.log"
+		w := New(Options{
+			Gate:  NewGate(c.mode, &bytes.Buffer{}),
+			Audit: NewAuditor(path),
+			Auth:  auth.New(auth.Options{Lease: noBrowser}),
+		})
+		_ = w.Like(t.Context(), "someone", "222", "")
+
+		records := readRecords(t, path)
+		if len(records) != 1 || records[0].AutoApproved != c.want {
+			t.Errorf("mode %v: records %+v, want one with auto_approved=%v", c.mode, records, c.want)
+		}
+	}
+}
+
 func TestBannerOnlyAppearsWhenEnabled(t *testing.T) {
-	if NewGate(false, nil).Banner() != "" {
+	if NewGate(WritesOff, nil).Banner() != "" {
 		t.Error("a disabled gate should print nothing")
 	}
-	if !strings.Contains(NewGate(true, nil).Banner(), "WRITES ENABLED") {
+	if !strings.Contains(NewGate(WritesApproved, nil).Banner(), "WRITES ENABLED") {
 		t.Error("the banner must tell the operator that writes are on")
 	}
 }

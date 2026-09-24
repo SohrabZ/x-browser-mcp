@@ -223,6 +223,11 @@ Check all four properties:
 4. The same write with that code goes ahead. The same code offered again, or
    for any other action, is refused and recorded as `denied`.
 
+Then restart with `-allow-writes -auto-approve`. The banner must say writes go
+ahead without approval. A write with no code goes ahead, the terminal prints
+`AUTO-APPROVED WRITE`, and its log line carries `"auto_approved":true`.
+`-auto-approve` without `-allow-writes` must refuse to start.
+
 ```bash
 curl -s -X POST http://127.0.0.1:18110/mcp \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
