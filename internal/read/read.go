@@ -252,30 +252,96 @@ func (r *Reader) FromURL(ctx context.Context, raw string, n int) (Resolved, erro
 	}
 }
 
-// Thread reads a post together with the replies shown beneath it.
+// Thread reads a post together with the conversation X shows around it.
 //
-// X renders the root and its replies as the same kind of article, so the first
-// post on the page is the root and the rest are replies.
+// The post asked for is found by its id, not by position. A reply's permalink
+// renders the posts it answers above it, so the first post on the page is the
+// top of the conversation, and taking it as the root answered a link to a reply
+// with somebody else's post. Everything above the post is its context and
+// everything below is replies.
+//
+// The limit counts replies. Ancestors are read whatever it is, since stopping at
+// n posts counted from the top would spend the limit on context and could stop
+// before the post itself was reached.
 func (r *Reader) Thread(ctx context.Context, handle, postID string, n int) (model.Thread, error) {
 	h := xui.NormalizeHandle(handle)
-	if h == "" || postID == "" {
-		return model.Thread{}, invalid("handle and post id are required")
+	if h == "" {
+		return model.Thread{}, invalid("handle is required")
 	}
+	// The id is matched against the digits in a status link, which an id of any
+	// other shape can never equal: it would load the right page and then report
+	// the post missing from it.
+	if !xui.ValidPostID(postID) {
+		return model.Thread{}, invalid("post id must be the digits X gives a post, got %q", shorten(postID))
+	}
+	n = ClampLimit(n)
 
-	res, err := r.timeline(ctx, cacheKey("thread|"+h+"|"+postID, n), xui.PostURL(h, postID), ClampLimit(n))
+	key := cacheKey("thread|"+h+"|"+postID, n)
+	res, err := r.gather(ctx, key, xui.PostURL(h, postID), 0, threadComplete(postID, n))
 	if err != nil {
 		return model.Thread{}, err
 	}
-	if len(res.Posts) == 0 {
-		return model.Thread{}, notFound("no posts found for that thread; it may be deleted, private, or the id may be wrong")
+
+	thread, found := threadFrom(res.Posts, postID, n)
+	if !found {
+		// A page that did not render the post is not worth keeping: serving it
+		// from the cache would answer every retry the same way for the whole
+		// TTL, however soon X would have rendered it.
+		r.cache.drop(key)
+		// Handing back another post from the page instead would put words in
+		// the wrong account's mouth, which is worse than no answer.
+		return model.Thread{}, notFound("the post was not among those X rendered for it; it may be deleted, private, or the id may be wrong")
 	}
-	return model.Thread{Root: res.Posts[0], Replies: res.Posts[1:]}, nil
+	return thread, nil
 }
 
-// timeline is the shared path behind every surface: cache, budget, auth, then
-// scroll-and-collect until the target count is reached or the page stops
-// producing new posts.
+// threadComplete reports that a collection holds the post and n replies below
+// it, which is all a thread read needs; the posts above it come along anyway.
+func threadComplete(postID string, n int) func([]model.Post) bool {
+	return func(posts []model.Post) bool {
+		at := indexOf(posts, postID)
+		return at >= 0 && len(posts)-at-1 >= n
+	}
+}
+
+// threadFrom arranges the posts of a permalink, in page order, around the one
+// asked for, keeping at most n replies. It reports false when that post is not
+// among them.
+func threadFrom(posts []model.Post, postID string, n int) (model.Thread, bool) {
+	at := indexOf(posts, postID)
+	if at < 0 {
+		return model.Thread{}, false
+	}
+	replies := posts[at+1:]
+	if len(replies) > n {
+		replies = replies[:n]
+	}
+	thread := model.Thread{Root: posts[at], Replies: replies}
+	if at > 0 {
+		thread.Ancestors = posts[:at]
+	}
+	return thread, true
+}
+
+// indexOf finds a post by id, or reports -1.
+func indexOf(posts []model.Post, id string) int {
+	for i, p := range posts {
+		if p.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// timeline is the shared path behind every surface that returns n posts.
 func (r *Reader) timeline(ctx context.Context, key, url string, n int) (Result, error) {
+	return r.gather(ctx, key, url, n, func(posts []model.Post) bool { return len(posts) >= n })
+}
+
+// gather is cache, budget and auth, then scroll-and-collect until enough says
+// the page has given what was asked for or the page stops producing new posts.
+// keep caps what is collected; zero keeps everything.
+func (r *Reader) gather(ctx context.Context, key, url string, keep int, enough func([]model.Post) bool) (Result, error) {
 	if hit, ok := r.cache.get(key); ok {
 		hit.Cached = true
 		return hit, nil
@@ -291,7 +357,7 @@ func (r *Reader) timeline(ctx context.Context, key, url string, n int) (Result, 
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	posts, err := collect(ctx, r, url, n, scrape, model.Dedupe,
+	posts, err := collect(ctx, r, url, keep, enough, scrape, model.Dedupe,
 		"no posts found; the account or list may not exist, or X did not render the timeline")
 	if err != nil {
 		return Result{}, err
@@ -351,7 +417,7 @@ func (r *Reader) Notifications(ctx context.Context, n int) (NotificationResult, 
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
-	items, err := collect(ctx, r, xui.NotificationsURL, n,
+	items, err := collect(ctx, r, xui.NotificationsURL, n, func(items []model.Notification) bool { return len(items) >= n },
 		scrapeNotifications, model.DedupeNotifications, "no notifications found")
 	if err != nil {
 		return NotificationResult{}, err
@@ -362,19 +428,22 @@ func (r *Reader) Notifications(ctx context.Context, n int) (NotificationResult, 
 	return result, nil
 }
 
-// collect opens the page and scrolls until it has enough items or the timeline
-// stops yielding new ones.
+// collect opens the page and scrolls until enough reports it has what was asked
+// for or the timeline stops yielding new items. keep caps what is gathered, and
+// zero leaves it uncapped.
 //
 // It is a function rather than a method, and generic over what it gathers, so the
-// notifications surface shares this loop instead of copying it. Only two things
-// differ between the surfaces: how a batch is read off the page, and how repeats
-// are recognised.
+// notifications surface shares this loop instead of copying it. Only three things
+// differ between the surfaces: how a batch is read off the page, how repeats are
+// recognised, and what counts as enough -- n items for a timeline, but for a
+// thread the post itself and n replies beneath it, however much sits above.
 func collect[T any](
 	ctx context.Context,
 	r *Reader,
 	url string,
-	n int,
-	read func(*browser.Page, int) ([]T, error),
+	keep int,
+	enough func([]T) bool,
+	read func(*browser.Page) ([]T, error),
 	dedupe func([]T, int) []T,
 	emptyReason string,
 ) ([]T, error) {
@@ -412,15 +481,15 @@ func collect[T any](
 			return nil, err
 		}
 
-		batch, err := read(page, n)
+		batch, err := read(page)
 		if err != nil && failed == nil {
 			failed = err
 		}
 		if err == nil {
 			before := len(gathered)
-			gathered = dedupe(append(gathered, batch...), n)
+			gathered = dedupe(append(gathered, batch...), keep)
 
-			if len(gathered) >= n {
+			if enough(gathered) {
 				return gathered, nil
 			}
 			if len(gathered) > before {
@@ -472,11 +541,11 @@ func cameBackEmpty(ctxErr, failed error, reason string) error {
 
 // scrapeNotifications runs the notification script and converts what it finds.
 //
-// The limit is ignored here on purpose. Capping in the page caps DOM nodes before
+// It takes no limit on purpose. Capping in the page caps DOM nodes before
 // repeats and empty cells have been discarded, so a page whose first cells repeat
 // would come back short while the rest sat rendered below it. collect applies the
 // cap when it dedupes, where what is counted is notifications.
-func scrapeNotifications(page *browser.Page, _ int) ([]model.Notification, error) {
+func scrapeNotifications(page *browser.Page) ([]model.Notification, error) {
 	value, err := page.Rod().Eval(xui.NotificationScript)
 	if err != nil {
 		return nil, err
@@ -489,9 +558,10 @@ func scrapeNotifications(page *browser.Page, _ int) ([]model.Notification, error
 	return xui.ToNotifications(raw), nil
 }
 
-// scrape runs the extraction script and converts what it finds.
-func scrape(page *browser.Page, n int) ([]model.Post, error) {
-	value, err := page.Rod().Eval(xui.ExtractScript, n)
+// scrape runs the extraction script and converts what it finds. Like
+// scrapeNotifications it takes no limit, for the same reason.
+func scrape(page *browser.Page) ([]model.Post, error) {
+	value, err := page.Rod().Eval(xui.ExtractScript)
 	if err != nil {
 		return nil, err
 	}

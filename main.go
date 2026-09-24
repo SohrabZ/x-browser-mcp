@@ -135,10 +135,9 @@ func run() error {
 		Timeout:  cfg.FetchTimeout,
 	})
 
-	gate, err := write.NewGate(cfg.AllowWrites)
-	if err != nil {
-		return err
-	}
+	// Approvals go to the terminal the server was started from: the one place a
+	// person reads that no model does.
+	gate := write.NewGate(cfg.AllowWrites, os.Stderr)
 	writer := write.New(write.Options{
 		Open:    open,
 		Auth:    authManager,

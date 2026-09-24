@@ -6,12 +6,15 @@ package write
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 
 	"github.com/SohrabZ/x-browser-mcp/internal/auth"
@@ -118,9 +121,9 @@ func (w *Writer) Post(ctx context.Context, text, confirm string) error {
 	if err := ValidateText(text); err != nil {
 		return err
 	}
-	return w.do(ctx, Record{Action: ActionPost, Excerpt: text}, confirm, func(p *browser.Page) error {
+	return w.do(ctx, Record{Action: ActionPost, Excerpt: text}, confirm, func(p *browser.Page) (string, error) {
 		if err := p.Goto(xui.HomeURL); err != nil {
-			return err
+			return "", err
 		}
 		return compose(p, text)
 	})
@@ -135,9 +138,9 @@ func (w *Writer) Reply(ctx context.Context, handle, postID, text, confirm string
 	if err != nil {
 		return err
 	}
-	return w.do(ctx, Record{Action: ActionReply, Target: target, Excerpt: text}, confirm, func(p *browser.Page) error {
+	return w.do(ctx, Record{Action: ActionReply, Target: target, Excerpt: text}, confirm, func(p *browser.Page) (string, error) {
 		if err := p.Goto(target); err != nil {
-			return err
+			return "", err
 		}
 		return compose(p, text)
 	})
@@ -155,7 +158,7 @@ func (w *Writer) Repost(ctx context.Context, handle, postID, confirm string) err
 	if err != nil {
 		return err
 	}
-	return w.do(ctx, Record{Action: ActionRepost, Target: target}, confirm, func(p *browser.Page) error {
+	return w.do(ctx, Record{Action: ActionRepost, Target: target}, confirm, engagement(func(p *browser.Page) error {
 		if err := p.Goto(target); err != nil {
 			return err
 		}
@@ -183,7 +186,7 @@ func (w *Writer) Repost(ctx context.Context, handle, postID, confirm string) err
 		settled()
 
 		return confirmApplied(p, target, postID, xui.SelUnrepostButton, ActionRepost)
-	})
+	}))
 }
 
 // Bookmark saves a post.
@@ -208,7 +211,7 @@ func (w *Writer) tap(ctx context.Context, action, handle, postID, confirm, butto
 	if err != nil {
 		return err
 	}
-	return w.do(ctx, Record{Action: action, Target: target}, confirm, func(p *browser.Page) error {
+	return w.do(ctx, Record{Action: action, Target: target}, confirm, engagement(func(p *browser.Page) error {
 		if err := p.Goto(target); err != nil {
 			return err
 		}
@@ -241,7 +244,13 @@ func (w *Writer) tap(ctx context.Context, action, handle, postID, confirm, butto
 		settled()
 
 		return confirmApplied(p, target, postID, alreadyDone, action)
-	})
+	}))
+}
+
+// engagement adapts an action that acts on an existing post, and so creates
+// nothing, to the shape do takes.
+func engagement(act func(*browser.Page) error) func(*browser.Page) (string, error) {
+	return func(p *browser.Page) (string, error) { return "", act(p) }
 }
 
 // postTarget validates the pair every action against an existing post needs,
@@ -336,10 +345,19 @@ const settleWait = 8 * time.Second
 const pollInterval = 200 * time.Millisecond
 
 // do runs the gate, budget and auth checks, performs the action, and records
-// the outcome whichever way it goes.
-func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func(*browser.Page) error) error {
-	if err := w.gate.Check(confirm); err != nil {
+// the outcome whichever way it goes. An action that publishes something reports
+// the id X gave it, which the record keeps.
+func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func(*browser.Page) (string, error)) error {
+	// The record's excerpt is still the whole text here; the auditor cuts it
+	// only when writing the line. The approval has to bind all of it.
+	if err := w.gate.Check(Request{Action: rec.Action, Target: rec.Target, Text: rec.Excerpt}, confirm); err != nil {
+		// Asking for approval is how every write starts, so it is recorded as
+		// its own outcome: a burst of denials is the sign of something trying
+		// codes, and ordinary use should not look like one.
 		rec.Outcome = OutcomeDenied
+		if errors.Is(err, ErrApprovalRequired) {
+			rec.Outcome = OutcomePending
+		}
 		rec.Reason = err.Error()
 		_ = w.audit.Log(rec)
 		return err
@@ -387,10 +405,12 @@ func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func
 	}
 	defer page.Close()
 
-	if err := action(page); err != nil {
+	created, err := action(page)
+	if err != nil {
 		return w.fail(rec, err)
 	}
 
+	rec.Created = created
 	rec.Outcome = OutcomeOK
 	_ = w.audit.Log(rec)
 	if w.onChange != nil {
@@ -471,6 +491,14 @@ func notApplied(format string, a ...any) error {
 	return &NotAppliedError{Reason: fmt.Sprintf(format, a...)}
 }
 
+// UnconfirmedError marks a post or reply that was submitted and that X never
+// answered. It may or may not have been published, and saying which would be a
+// guess, so it says that instead: a caller told "failed" would send it again,
+// and one told "posted" would never check.
+type UnconfirmedError struct{ Reason string }
+
+func (e *UnconfirmedError) Error() string { return e.Reason }
+
 // InvalidError marks a request the caller got wrong, as distinct from a write
 // that was attempted and did not take effect. The two deserve different
 // answers: one is worth correcting and sending again, the other is not.
@@ -495,10 +523,10 @@ func ValidateText(text string) error {
 }
 
 // compose types text into the composer and submits it.
-func compose(p *browser.Page, text string) error {
+func compose(p *browser.Page, text string) (string, error) {
 	box, err := p.Rod().Element(xui.SelComposeBox)
 	if err != nil {
-		return fmt.Errorf("compose box not found: %w", err)
+		return "", fmt.Errorf("compose box not found: %w", err)
 	}
 
 	// Click before typing. A reply composer sits collapsed until it is focused,
@@ -506,39 +534,135 @@ func compose(p *browser.Page, text string) error {
 	// appears to fill, the submit button stays disabled, and the click that
 	// follows lands on a control that cannot be pressed.
 	if err := box.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return fmt.Errorf("focus compose box: %w", err)
+		return "", fmt.Errorf("focus compose box: %w", err)
 	}
 	if err := box.Input(text); err != nil {
-		return fmt.Errorf("enter post text: %w", err)
+		return "", fmt.Errorf("enter post text: %w", err)
 	}
 
 	// Wait for X to accept the text rather than assuming it did. The submit
 	// button is disabled until then, so this doubles as confirmation that the
 	// composer actually holds what we typed.
 	if err := waitEnabled(p, xui.SelComposeButton, composeWait); err != nil {
-		return err
+		return "", err
 	}
 
-	// Watch the network before submitting. A post is the same shape of problem
-	// as a like: X accepts the click and sends the post afterwards, and the tab
-	// is discarded as soon as this returns, which is enough to lose a request
-	// still in flight. There is nothing to reload to confirm it -- a new post
-	// has no address yet -- so this wait is what the write rests on.
-	settled := settle(p)
-	defer settled()
+	// Listen before submitting. A post is the same shape of problem as a like:
+	// X accepts the click and sends the post afterwards, and the tab is discarded
+	// as soon as this returns, which is enough to lose a request still in
+	// flight. And there is nothing to reload to confirm it, since a new post has
+	// no address until X gives it one. So X's answer to the request is what the
+	// write rests on.
+	//
+	// It used to rest on the page going quiet, and a page that never did was
+	// reported as posted anyway. That answered "Posted." for a post X had refused
+	// -- a duplicate, a rate limit -- and for one it never received.
+	answer := watchCreate(p)
 
 	if err := click(p, xui.SelComposeButton); err != nil {
-		return err
+		answer(0)
+		return "", err
 	}
-	if !settled() {
-		// Not treated as a failure: X had accepted the text and the submit went
-		// through, and refusing a post over a page that would not go quiet would
-		// be its own kind of wrong answer. But it is the one write with nothing
-		// to reload and confirm, so the doubt is worth recording.
-		slog.Warn("the page never went quiet after submitting; the post may not have been sent",
-			"waited", settleWait)
+	return answer(createWait)
+}
+
+// createWait bounds the wait for X to answer a post. X answers in about a
+// second; this only has to outlast a slow one.
+//
+// It is a variable so tests can shorten it.
+var createWait = 15 * time.Second
+
+// watchCreate listens for X's answer to the request that publishes a post, and
+// returns the wait for it. The wait reports the new post's id, or why there is
+// none, and stops the listening whichever way it ends; a budget of zero stops it
+// at once.
+//
+// The answer is read where X's own client reads it, so the verdict is the one X
+// shows the user: an id means X created the post. Anything short of an answer
+// is reported as unconfirmed rather than failed, because the post may well have
+// been published, and a caller told it failed would send it again.
+func watchCreate(p *browser.Page) func(budget time.Duration) (string, error) {
+	page, stop := p.Rod().WithCancel()
+
+	type outcome struct {
+		id  string
+		err error
 	}
-	return nil
+	answered := make(chan outcome, 1)
+
+	// Subscribing here, before the submit, is what makes the request visible:
+	// events are delivered from the moment of the call, and the network domain
+	// is enabled for as long as the listening lasts. The callbacks run one at a
+	// time, so request needs no lock.
+	var request proto.NetworkRequestID
+	listen := page.EachEvent(
+		func(e *proto.NetworkRequestWillBeSent) {
+			if request == "" && e.Request.Method == "POST" && xui.IsCreatePost(e.Request.URL) {
+				request = e.RequestID
+			}
+		},
+		func(e *proto.NetworkLoadingFinished) bool {
+			if request == "" || e.RequestID != request {
+				return false
+			}
+			id, err := readCreated(page, request)
+			answered <- outcome{id, err}
+			return true
+		},
+		func(e *proto.NetworkLoadingFailed) bool {
+			if request == "" || e.RequestID != request {
+				return false
+			}
+			// The browser lost the answer, which says nothing about whether X
+			// received the request.
+			slog.Warn("the request publishing a post failed in the browser", "err", e.ErrorText)
+			answered <- outcome{err: unconfirmed()}
+			return true
+		},
+	)
+	go listen()
+
+	return func(budget time.Duration) (string, error) {
+		defer stop()
+		select {
+		case got := <-answered:
+			return got.id, got.err
+		case <-time.After(budget):
+			return "", unconfirmed()
+		}
+	}
+}
+
+// readCreated reads X's answer to the request that published a post.
+func readCreated(page *rod.Page, request proto.NetworkRequestID) (string, error) {
+	res, err := proto.NetworkGetResponseBody{RequestID: request}.Call(page)
+	if err != nil {
+		slog.Warn("X answered the post, but the answer could not be read", "err", err)
+		return "", unconfirmed()
+	}
+	body := []byte(res.Body)
+	if res.Base64Encoded {
+		if body, err = base64.StdEncoding.DecodeString(res.Body); err != nil {
+			slog.Warn("X's answer to the post could not be decoded", "err", err)
+			return "", unconfirmed()
+		}
+	}
+
+	id, refusal := xui.CreatedPost(body)
+	switch {
+	case id != "":
+		return id, nil
+	case refusal != "":
+		return "", notApplied("X did not publish it: %s", refusal)
+	default:
+		return "", unconfirmed()
+	}
+}
+
+// unconfirmed is what a post X never answered is reported as.
+func unconfirmed() error {
+	return &UnconfirmedError{Reason: fmt.Sprintf("X did not confirm the post within %s. It may have been "+
+		"published, so check the account before sending it again", createWait)}
 }
 
 // composeWait bounds how long to wait for the submit control to become usable.

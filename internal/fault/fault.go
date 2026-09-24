@@ -52,9 +52,9 @@ const (
 	// Timeout is work that did not finish inside the caller's budget.
 	Timeout
 
-	// NotApplied is a write that was carried out and that X did not apply. The
-	// distinction from Internal matters: the machinery worked, so the caller has
-	// a real answer rather than a fault to report.
+	// NotApplied is a write that was carried out and that X did not apply, or
+	// did not confirm. The distinction from Internal matters: the machinery
+	// worked, so the caller has a real answer rather than a fault to report.
 	NotApplied
 )
 
@@ -89,11 +89,14 @@ func Describe(err error) (Kind, string) {
 		badWrite   *write.InvalidError
 		goneWrite  *write.NotFoundError
 		notApplied *write.NotAppliedError
+		unsure     *write.UnconfirmedError
 	)
 
 	switch {
 	case errors.Is(err, write.ErrDisabled):
 		return Refused, write.ErrDisabled.Error()
+	case errors.Is(err, write.ErrApprovalRequired):
+		return Refused, write.ErrApprovalRequired.Error()
 	case errors.Is(err, write.ErrBadConfirmation):
 		return Refused, write.ErrBadConfirmation.Error()
 	case errors.Is(err, auth.ErrLoginRequired):
@@ -110,6 +113,8 @@ func Describe(err error) (Kind, string) {
 		return Missing, goneWrite.Error()
 	case errors.As(err, &notApplied):
 		return NotApplied, notApplied.Error()
+	case errors.As(err, &unsure):
+		return NotApplied, unsure.Error()
 	case errors.Is(err, browser.ErrProfileInUse):
 		return Busy, browser.ErrProfileInUse.Error()
 	case errors.Is(err, pool.ErrClosed):

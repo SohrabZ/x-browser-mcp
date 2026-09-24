@@ -24,13 +24,15 @@ func TestDescribeClassifiesEachFailure(t *testing.T) {
 		says string
 	}{
 		{"writes disabled", write.ErrDisabled, Refused, write.ErrDisabled.Error()},
-		{"wrong token", write.ErrBadConfirmation, Refused, write.ErrBadConfirmation.Error()},
+		{"awaiting approval", write.ErrApprovalRequired, Refused, write.ErrApprovalRequired.Error()},
+		{"wrong code", write.ErrBadConfirmation, Refused, write.ErrBadConfirmation.Error()},
 		{"not signed in", auth.ErrLoginRequired, LoginRequired, auth.ErrLoginRequired.Error()},
 		{"budget spent", &limit.ExhaustedError{}, Paced, (&limit.ExhaustedError{}).Error()},
 		{"bad read request", &read.InvalidError{Reason: "list id is required"}, Invalid, "list id is required"},
 		{"bad write request", &write.InvalidError{Reason: "post text is required"}, Invalid, "post text is required"},
 		{"nothing there", &read.NotFoundError{Reason: "no posts found"}, Missing, "no posts found"},
 		{"X did not apply it", &write.NotAppliedError{Reason: "like did not stick"}, NotApplied, "like did not stick"},
+		{"X never answered", &write.UnconfirmedError{Reason: "X did not confirm the post"}, NotApplied, "X did not confirm the post"},
 		{"no such post to act on", &write.NotFoundError{Reason: "no post at that address"}, Missing, "no post at that address"},
 		{"profile in use", browser.ErrProfileInUse, Busy, browser.ErrProfileInUse.Error()},
 		{"shutting down", pool.ErrClosed, Busy, pool.ErrClosed.Error()},

@@ -281,9 +281,15 @@ const notificationFixture = `
   </article>
 </div>`
 
-// scrapeFixture drives a real browser at a page, because a selector cannot be
-// tested any other way.
-func scrapeFixture(t *testing.T, body string, n int) []model.Notification {
+// scrapeFixture reads a page of notifications through the real script.
+func scrapeFixture(t *testing.T, body string) []model.Notification {
+	t.Helper()
+	return onFixture(t, body, scrapeNotifications)
+}
+
+// onFixture drives a real browser at a page and reads it, because a selector
+// cannot be tested any other way.
+func onFixture[T any](t *testing.T, body string, read func(*browser.Page) ([]T, error)) []T {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("needs a browser")
@@ -317,7 +323,7 @@ func scrapeFixture(t *testing.T, body string, n int) []model.Notification {
 		t.Fatalf("goto: %v", err)
 	}
 
-	got, err := scrapeNotifications(page, n)
+	got, err := read(page)
 	if err != nil {
 		t.Fatalf("scrape: %v", err)
 	}
@@ -328,7 +334,7 @@ func scrapeFixture(t *testing.T, body string, n int) []model.Notification {
 // return the single reply and drop the other five, which is a worse answer than
 // no answer: it looks complete.
 func TestEveryNotificationCellIsRead(t *testing.T) {
-	got := scrapeFixture(t, notificationFixture, 50)
+	got := scrapeFixture(t, notificationFixture)
 
 	if len(got) != 5 {
 		t.Fatalf("read %d notifications, want 5 (the article is not one): %+v", len(got), got)
@@ -346,7 +352,7 @@ func TestEveryNotificationCellIsRead(t *testing.T) {
 // An aggregated cell keeps both actors rather than being split into rows X never
 // rendered, and the post it concerns is reported apart from the words about it.
 func TestAnAggregatedCellKeepsItsActors(t *testing.T) {
-	got := scrapeFixture(t, notificationFixture, 50)
+	got := scrapeFixture(t, notificationFixture)
 
 	var found bool
 	for _, n := range got {
@@ -372,7 +378,7 @@ func TestAnAggregatedCellKeepsItsActors(t *testing.T) {
 // Kind is read from X's own words, so it is a convenience and not a contract.
 // What matters is that it is right when it is set and absent when unsure.
 func TestKindIsReadWhenTheWordsSayIt(t *testing.T) {
-	got := scrapeFixture(t, notificationFixture, 50)
+	got := scrapeFixture(t, notificationFixture)
 
 	kinds := map[string]string{}
 	for _, n := range got {
@@ -397,7 +403,7 @@ func TestKindIsReadWhenTheWordsSayIt(t *testing.T) {
 // Non-Latin text has to survive the round trip. This account's own notifications
 // are largely Persian, so a fixture that only proves ASCII works proves little.
 func TestNonLatinNotificationTextSurvives(t *testing.T) {
-	got := scrapeFixture(t, notificationFixture, 50)
+	got := scrapeFixture(t, notificationFixture)
 
 	for _, n := range got {
 		if strings.Contains(n.Text, "liked 2 of your posts") {
@@ -412,7 +418,7 @@ func TestNonLatinNotificationTextSurvives(t *testing.T) {
 
 // A follow names nobody's post, and must not borrow the next cell's.
 func TestAFollowCarriesNoPostText(t *testing.T) {
-	got := scrapeFixture(t, notificationFixture, 50)
+	got := scrapeFixture(t, notificationFixture)
 
 	for _, n := range got {
 		if strings.Contains(n.Text, "followed you") && n.PostText != "" {
@@ -425,7 +431,7 @@ func TestAFollowCarriesNoPostText(t *testing.T) {
 // before repeats and empty cells are discarded, so the cap belongs where what is
 // being counted is notifications -- which is what the caller asked for.
 func TestTheScriptReadsEveryCellAndLeavesTheCapToTheCaller(t *testing.T) {
-	all := scrapeFixture(t, notificationFixture, 2)
+	all := scrapeFixture(t, notificationFixture)
 	if len(all) != 5 {
 		t.Fatalf("read %d, want every cell regardless of the limit", len(all))
 	}
@@ -453,7 +459,7 @@ func TestActorsDoNotLeakBetweenCellsSharingAWrapper(t *testing.T) {
   </div>
 </div>`
 
-	got := scrapeFixture(t, shared, 10)
+	got := scrapeFixture(t, shared)
 	if len(got) != 2 {
 		t.Fatalf("read %d, want 2: %+v", len(got), got)
 	}
@@ -493,7 +499,7 @@ func TestRepeatsAmongTheFirstCellsDoNotShortenTheAnswer(t *testing.T) {
 		cell("alice", "Alice liked your post", "2026-08-05T10:00:00.000Z", "a post") +
 		cell("bob", "Bob followed you", "2026-08-05T09:00:00.000Z", "")
 
-	got := scrapeFixture(t, page, 50)
+	got := scrapeFixture(t, page)
 	if len(got) != 3 {
 		t.Fatalf("the script read %d cells, want all 3 before dedupe", len(got))
 	}
@@ -528,7 +534,7 @@ func TestAQuotedPostInsideANotificationIsNotTheNotification(t *testing.T) {
   </article>
 </div>`
 
-	got := scrapeFixture(t, page, 10)
+	got := scrapeFixture(t, page)
 	if len(got) != 1 {
 		t.Fatalf("read %d, want 1", len(got))
 	}
@@ -557,7 +563,7 @@ func TestPostTextIsRemovedFromTheEndNotTheMiddle(t *testing.T) {
   </div>
 </div>`
 
-	got := scrapeFixture(t, page, 10)
+	got := scrapeFixture(t, page)
 	if len(got) != 1 {
 		t.Fatalf("read %d, want 1", len(got))
 	}

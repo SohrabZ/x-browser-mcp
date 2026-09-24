@@ -140,9 +140,11 @@ against user error.
 
 1. **Off by default.** Writes require `-allow-writes`. Without it the write
    tools are not registered at all, so the model cannot see or call them.
-2. **Not derivable from page content.** Every write takes a `confirm` token
-   that must match a value generated at startup and printed to the operator's
-   terminal. Injected text cannot supply a token it has never seen.
+2. **Approved per action, outside the model's context.** A write without a
+   code makes the server print the action and a fresh code in the operator's
+   terminal. The code approves that action once, for five minutes. A model
+   cannot invent a code it has never seen, and a code the user gave for one
+   action cannot approve another, so a post in the same context cannot spend it.
 3. **Separate, tight budget.** `limit` tracks writes independently of reads,
    defaulting to a handful per hour.
 4. **Append-only audit log.** Every attempt — allowed, denied or failed —
@@ -152,7 +154,9 @@ against user error.
    is recoverable by hand.
 
 Read tools additionally wrap returned post text in explicit untrusted-content
-delimiters and say so in their descriptions.
+delimiters and say so in their descriptions. The JSON copy of each result, which
+MCP clients may give the model instead of the text, carries the same notice in
+its `notice` field.
 
 ## Rate limiting
 

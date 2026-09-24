@@ -26,6 +26,28 @@ type Post struct {
 	// text at all -- image-only replies are how threads of visual work are
 	// usually published -- so this is often the entire content.
 	Media []Media `json:"media,omitempty"`
+
+	// Quoted is the post this one quotes, when it quotes one. A quote's own
+	// words are often meaningless without it -- "this is exactly right" -- and
+	// it is kept apart so that none of it is mistaken for this post's.
+	Quoted *Quote `json:"quoted,omitempty"`
+}
+
+// Quote is a post shown inside another.
+//
+// It is not a Post because X does not render one. The quoted post appears as a
+// card with a byline, text, time and media, but with no counters and usually no
+// link to its own status, so there is no id or engagement to report. Inventing
+// zeros for those would read as a post nobody engaged with.
+type Quote struct {
+	// ID and URL are set only when the card links to the quoted post.
+	ID        string    `json:"id,omitempty"`
+	URL       string    `json:"url,omitempty"`
+	Title     string    `json:"title,omitempty"`
+	Text      string    `json:"text,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	Author    Author    `json:"author"`
+	Media     []Media   `json:"media,omitempty"`
 }
 
 // Media is an image attached to a post.
@@ -50,10 +72,16 @@ type Metrics struct {
 	Views   int `json:"views,omitempty"`
 }
 
-// Thread is a root post together with the replies shown beneath it.
+// Thread is a post together with the conversation X shows around it.
+//
+// Root is the post that was asked for, which is not always the first one on the
+// page: a reply's permalink renders the posts it answers above it. Those are
+// Ancestors, oldest first, and are kept apart from Replies because they are the
+// context the post was written in, not responses to it.
 type Thread struct {
-	Root    Post   `json:"root"`
-	Replies []Post `json:"replies"`
+	Ancestors []Post `json:"ancestors,omitempty"`
+	Root      Post   `json:"root"`
+	Replies   []Post `json:"replies"`
 }
 
 // Contributor counts how many posts one account contributed to a result set.
@@ -67,12 +95,13 @@ type Contributor struct {
 //
 // Partially rendered timeline entries are common and are dropped rather than
 // surfaced as blanks. Text is not required: an image-only post is complete,
-// and requiring text silently discarded whole self-threads of visual work.
+// and requiring text silently discarded whole self-threads of visual work. Nor
+// is anything of its own: a quote with no words added still says what it quotes.
 func (p Post) Usable() bool {
 	if p.ID == "" || p.Author.Handle == "" {
 		return false
 	}
-	return strings.TrimSpace(p.Text) != "" || strings.TrimSpace(p.Title) != "" || len(p.Media) > 0
+	return strings.TrimSpace(p.Text) != "" || strings.TrimSpace(p.Title) != "" || len(p.Media) > 0 || p.Quoted != nil
 }
 
 // Dedupe returns the usable posts in input order with duplicate IDs removed,

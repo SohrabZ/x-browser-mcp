@@ -17,6 +17,10 @@ const (
 	OutcomeOK     Outcome = "ok"
 	OutcomeDenied Outcome = "denied"
 	OutcomeFailed Outcome = "failed"
+
+	// OutcomePending is a write that asked for approval and was shown to the
+	// operator. Every write begins this way, so it is not a denial.
+	OutcomePending Outcome = "approval_requested"
 )
 
 // Record is one line of the audit log.
@@ -25,8 +29,10 @@ type Record struct {
 	Action  string    `json:"action"`
 	Target  string    `json:"target,omitempty"`
 	Excerpt string    `json:"excerpt,omitempty"`
-	Outcome Outcome   `json:"outcome"`
-	Reason  string    `json:"reason,omitempty"`
+	// Created is the id X gave the post or reply the write published.
+	Created string  `json:"created,omitempty"`
+	Outcome Outcome `json:"outcome"`
+	Reason  string  `json:"reason,omitempty"`
 }
 
 // Auditor appends write attempts to a file.

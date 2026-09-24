@@ -326,6 +326,9 @@ type RawPost struct {
 	Reposts   int        `json:"reposts"`
 	Likes     int        `json:"likes"`
 	Media     []RawMedia `json:"media"`
+
+	// Quoted is the card of a post this one quotes, read from the card alone.
+	Quoted *RawPost `json:"quoted"`
 }
 
 // RawMedia is an image as scraped from the DOM.
@@ -340,44 +343,85 @@ func (r RawPost) ToPost() (model.Post, bool) {
 	handle := NormalizeHandle(r.Handle)
 	id := PostIDFromHref(r.Href)
 	text := model.Normalize(r.Text)
-
-	media := make([]model.Media, 0, len(r.Media))
-	for _, m := range r.Media {
-		if url := strings.TrimSpace(m.URL); url != "" {
-			media = append(media, model.Media{URL: url, Alt: strings.TrimSpace(m.Alt)})
-		}
-	}
-
 	title := model.Normalize(r.Title)
+	media := r.media()
+	var quoted *model.Quote
+	if r.Quoted != nil {
+		quoted = r.Quoted.toQuote()
+	}
 
 	// Text is deliberately not required. Image-only posts are how visual
 	// self-threads are published, and an X Article carries a title and body
-	// rather than tweet text; demanding text dropped both entirely.
-	if handle == "" || id == "" || (text == "" && title == "" && len(media) == 0) {
+	// rather than tweet text; demanding text dropped both entirely. A quote
+	// that adds nothing of its own still says what it quotes.
+	if handle == "" || id == "" || (text == "" && title == "" && len(media) == 0 && quoted == nil) {
 		return model.Post{}, false
 	}
 
 	post := model.Post{
-		ID:     id,
-		Title:  title,
-		Text:   text,
-		URL:    PostURL(handle, id),
-		Author: model.Author{Name: strings.TrimSpace(r.Name), Handle: handle},
+		ID:        id,
+		Title:     title,
+		Text:      text,
+		URL:       PostURL(handle, id),
+		CreatedAt: r.createdAt(),
+		Author:    model.Author{Name: strings.TrimSpace(r.Name), Handle: handle},
 		Metrics: model.Metrics{
 			Replies: r.Replies,
 			Reposts: r.Reposts,
 			Likes:   r.Likes,
 		},
-	}
-	if len(media) > 0 {
-		post.Media = media
-	}
-	if r.CreatedAt != "" {
-		if at, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil {
-			post.CreatedAt = at.UTC()
-		}
+		Media:  media,
+		Quoted: quoted,
 	}
 	return post, true
+}
+
+// toQuote converts a quoted card, or reports nil when it said nothing.
+//
+// It asks for less than ToPost does. A quoted card has no link to its own status
+// in the layout X serves today, so demanding an id would throw away every quote
+// -- and the quote is the half of a quote post that says what it is about.
+func (r RawPost) toQuote() *model.Quote {
+	handle := NormalizeHandle(r.Handle)
+	text := model.Normalize(r.Text)
+	title := model.Normalize(r.Title)
+	media := r.media()
+	if handle == "" || (text == "" && title == "" && len(media) == 0) {
+		return nil
+	}
+
+	q := &model.Quote{
+		Title:     title,
+		Text:      text,
+		CreatedAt: r.createdAt(),
+		Author:    model.Author{Name: strings.TrimSpace(r.Name), Handle: handle},
+		Media:     media,
+	}
+	if id := PostIDFromHref(r.Href); id != "" {
+		q.ID = id
+		q.URL = PostURL(handle, id)
+	}
+	return q
+}
+
+// media keeps the images that have an address, or nil when none do.
+func (r RawPost) media() []model.Media {
+	var out []model.Media
+	for _, m := range r.Media {
+		if url := strings.TrimSpace(m.URL); url != "" {
+			out = append(out, model.Media{URL: url, Alt: strings.TrimSpace(m.Alt)})
+		}
+	}
+	return out
+}
+
+// createdAt parses the scraped timestamp, leaving the zero time when it cannot.
+func (r RawPost) createdAt() time.Time {
+	at, err := time.Parse(time.RFC3339, r.CreatedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return at.UTC()
 }
 
 // ToPosts converts scraped posts, dropping incomplete ones.
@@ -431,11 +475,34 @@ func ToNotifications(raw []RawNotification) []model.Notification {
 	return out
 }
 
-// ExtractScript reads the posts currently rendered on the page.
+// ExtractScript reads every post currently rendered on the page, in page order,
+// as RawPost-shaped objects. Metric labels are abbreviated by X ("1.2K"), so the
+// counts it returns are approximate.
 //
-// It takes a limit and returns RawPost-shaped objects. Metric labels are
-// abbreviated by X ("1.2K"), so the counts it returns are approximate.
-const ExtractScript = `limit => {
+// Each post is read only from what it renders itself. A quote post renders the
+// post it quotes inside its own article, with a byline, text, time and media of
+// its own, so a search of the article's subtree finds whichever of those comes
+// first. On a quote post's permalink that is the quoted post's time, since the
+// post's own sits at the bottom: the quote was reported as written when the post
+// it quotes was. And a quote with no words of its own read as the quoted
+// account's words, with the quoted post's images.
+//
+// X renders the quoted post as a link-role card rather than an article, and the
+// card carries no link to its own status. It is recognised by what every quoted
+// post has: a byline other than the post's own. A nested post article is
+// excluded as well, the way ControlScript excludes one. What the card says is
+// returned as the post's quoted field rather than dropped, since a quote's own
+// words are often meaningless without it.
+//
+// Ownership is decided by the nearest post article, not the nearest article of
+// any kind. An X Article renders its title, body and images inside an article
+// element of its own, and asking for the nearest article disowned all of it.
+//
+// It applies no limit, for the reason NotificationScript gives: capping here
+// caps elements before the ones still rendering have been discarded, so a page
+// whose first few articles are empty would come back with nothing while its
+// posts sat just below. The cap belongs to the caller, after conversion.
+const ExtractScript = `() => {
   const count = label => {
     if (!label) return 0;
     const raw = (label.getAttribute('aria-label') || label.innerText || '').trim().toLowerCase();
@@ -447,34 +514,36 @@ const ExtractScript = `limit => {
     return Math.round(n * scale);
   };
 
-  const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+  // What one post says, read from root but only from the elements owns accepts.
+  // Every lookup goes through it, so nothing can reach past a post's boundary.
+  const fields = (root, owns) => {
+    const own = sel => Array.from(root.querySelectorAll(sel)).filter(owns);
+    const text = sel => { const el = own(sel)[0]; return el ? (el.innerText || '') : ''; };
 
-  return articles.slice(0, limit).map(article => {
-    const time = article.querySelector('time');
-    const link = time?.closest('a[href*="/status/"]') || article.querySelector('a[href*="/status/"]');
-    const nameBlock = article.querySelector('[data-testid="User-Name"]');
-    const spans = nameBlock
-      ? Array.from(nameBlock.querySelectorAll('span')).map(s => (s.textContent || '').trim()).filter(Boolean)
+    const time = own('time')[0] || null;
+    // The link around the time can sit outside a quoted card, so it counts only
+    // when it belongs to the same post as the time does.
+    const around = time ? time.closest('a[href*="/status/"]') : null;
+    const link = (around && owns(around)) ? around : (own('a[href*="/status/"]')[0] || null);
+
+    const byline = own('[data-testid="User-Name"]')[0] || null;
+    const spans = byline
+      ? Array.from(byline.querySelectorAll('span')).map(s => (s.textContent || '').trim()).filter(Boolean)
       : [];
     const handle = spans.find(s => s.startsWith('@')) || '';
 
     // Many posts carry only images. Avatars and emoji live outside
     // tweetPhoto/card wrappers, so scoping to those keeps them out.
-    const media = Array.from(
-      article.querySelectorAll('[data-testid="tweetPhoto"] img, [data-testid="card.wrapper"] img')
-    )
+    const media = own('[data-testid="tweetPhoto"] img, [data-testid="card.wrapper"] img')
       .map(img => ({ url: img.getAttribute('src') || '', alt: img.getAttribute('alt') || '' }))
       .filter(m => m.url && !m.url.includes('profile_images') && !m.url.includes('/emoji/'));
 
     // X Articles are long-form posts. They render no tweetText at all -- the
     // headline and body live under their own testids -- so reading only
     // tweetText returned an article as empty.
-    const articleTitle = article.querySelector('[data-testid="twitter-article-title"]')?.innerText || '';
-    const longform = article.querySelector(
-      '[data-testid="longformRichTextComponent"], [data-testid="twitterArticleRichTextView"]'
-    )?.innerText || '';
-
-    const tweetText = article.querySelector('[data-testid="tweetText"]')?.innerText || '';
+    const articleTitle = text('[data-testid="twitter-article-title"]');
+    const longform = text('[data-testid="longformRichTextComponent"], [data-testid="twitterArticleRichTextView"]');
+    const tweetText = text('[data-testid="tweetText"]');
 
     return {
       href: link ? (link.getAttribute('href') || '') : '',
@@ -485,11 +554,36 @@ const ExtractScript = `limit => {
       created_at: time ? (time.getAttribute('datetime') || '') : '',
       handle,
       name: spans.find(s => !s.startsWith('@')) || handle.replace(/^@/, ''),
-      replies: count(article.querySelector('[data-testid="reply"]')),
-      reposts: count(article.querySelector('[data-testid="retweet"], [data-testid="unretweet"]')),
-      likes: count(article.querySelector('[data-testid="like"], [data-testid="unlike"]')),
-      media
+      replies: count(own('[data-testid="reply"]')[0]),
+      reposts: count(own('[data-testid="retweet"], [data-testid="unretweet"]')[0]),
+      likes: count(own('[data-testid="like"], [data-testid="unlike"]')[0]),
+      media,
+      quoted: null
     };
+  };
+
+  const POST = 'article[data-testid="tweet"]';
+  const posts = Array.from(document.querySelectorAll(POST))
+    .filter(article => !(article.parentElement && article.parentElement.closest(POST)));
+
+  return posts.map(post => {
+    const inPost = el => el.closest(POST) === post;
+    const byline = Array.from(post.querySelectorAll('[data-testid="User-Name"]')).filter(inPost)[0] || null;
+
+    const nested = Array.from(post.querySelectorAll(POST))
+      .filter(q => q.parentElement.closest(POST) === post);
+    const cards = Array.from(post.querySelectorAll('[role="link"]'))
+      .filter(el => inPost(el) && el.querySelector('[data-testid="User-Name"]') && !(byline && el.contains(byline)));
+
+    const raw = fields(post, el => inPost(el) && !cards.some(card => card.contains(el)));
+
+    const quote = nested[0] || cards[0] || null;
+    if (quote) {
+      raw.quoted = quote.matches(POST)
+        ? fields(quote, el => el.closest(POST) === quote)
+        : fields(quote, el => quote.contains(el));
+    }
+    return raw;
   });
 }`
 
