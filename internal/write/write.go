@@ -45,6 +45,7 @@ const (
 // assert -- every call would drive Chrome at X.
 type Actions interface {
 	Enabled() bool
+	AutoApproved() bool
 	Post(ctx context.Context, text, confirm string) error
 	Reply(ctx context.Context, handle, postID, text, confirm string) error
 	Like(ctx context.Context, handle, postID, confirm string) error
@@ -115,6 +116,11 @@ func New(opts Options) *Writer {
 // check cannot catch it, so answering honestly here is what keeps a missing
 // writer from being a panic at startup.
 func (w *Writer) Enabled() bool { return w != nil && w.gate.Enabled() }
+
+// AutoApproved reports whether writes go ahead without an approval code. The
+// transports describe the write tools differently when they do, since telling a
+// model to fetch a code nobody will ask for is a prompt that misleads it.
+func (w *Writer) AutoApproved() bool { return w != nil && w.gate.AutoApproved() }
 
 // Post publishes a new post.
 func (w *Writer) Post(ctx context.Context, text, confirm string) error {
@@ -362,6 +368,10 @@ func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func
 		_ = w.audit.Log(rec)
 		return err
 	}
+	// Every line from here on says whether a person approved this write or the
+	// server let it through, since that is the first question after one that
+	// should not have happened.
+	rec.AutoApproved = w.gate.AutoApproved()
 
 	if err := w.auth.Require(ctx); err != nil {
 		return w.fail(rec, err)

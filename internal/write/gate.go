@@ -29,6 +29,24 @@ var (
 		"already used, or was shown for a different action); the terminal now shows a new code for this one")
 )
 
+// Mode is how writes are authorised.
+type Mode int
+
+const (
+	// WritesOff registers no write tools at all.
+	WritesOff Mode = iota
+
+	// WritesApproved asks for a code for each write. It is what -allow-writes
+	// means on its own.
+	WritesApproved
+
+	// WritesAutoApproved lets every write through without a code. It exists for
+	// an operator who has decided the convenience is worth it, and it gives up
+	// what the codes are for: any post the agent reads can make it write as the
+	// account. Each write is still printed to the operator, paced and logged.
+	WritesAutoApproved
+)
+
 // Request is one write as the operator is asked to approve it: what it does,
 // to which post, with what text. A code approves exactly this and nothing else.
 type Request struct {
@@ -57,7 +75,7 @@ type Request struct {
 // like cannot post, and the terminal says what each code is for before the user
 // hands it over.
 type Gate struct {
-	enabled  bool
+	mode     Mode
 	operator io.Writer
 	now      func() time.Time
 
@@ -82,17 +100,21 @@ const approvalTTL = 5 * time.Minute
 // oldest is forgotten rather than kept for someone flooding the terminal.
 const maxPending = 16
 
-// NewGate builds a gate. When enabled, approvals are shown on operator, which is
-// the server's terminal: somewhere a person reads and a model does not.
-func NewGate(enabled bool, operator io.Writer) *Gate {
+// NewGate builds a gate. Approvals, and the writes that went ahead without one,
+// are shown on operator, which is the server's terminal: somewhere a person
+// reads and a model does not.
+func NewGate(mode Mode, operator io.Writer) *Gate {
 	if operator == nil {
 		operator = os.Stderr
 	}
-	return &Gate{enabled: enabled, operator: operator, now: time.Now}
+	return &Gate{mode: mode, operator: operator, now: time.Now}
 }
 
 // Enabled reports whether write tools should be registered at all.
-func (g *Gate) Enabled() bool { return g != nil && g.enabled }
+func (g *Gate) Enabled() bool { return g != nil && g.mode != WritesOff }
+
+// AutoApproved reports whether writes go ahead without a code.
+func (g *Gate) AutoApproved() bool { return g != nil && g.mode == WritesAutoApproved }
 
 // Check authorises one write. A code that approves this exact request is used
 // up and the write may go ahead. Anything else -- no code, or one that does not
@@ -111,6 +133,13 @@ func (g *Gate) Check(req Request, code string) error {
 	defer g.mu.Unlock()
 
 	now := g.now()
+	if g.AutoApproved() {
+		// Nobody is asked, so the operator is told instead. Failing to tell
+		// them does not stop the write: the operator chose not to be asked, and
+		// the audit log is the record either way.
+		_, _ = io.WriteString(g.operator, "\n  AUTO-APPROVED WRITE: "+req.Action+"\n"+req.describe())
+		return nil
+	}
 	g.forgetExpired(now)
 
 	if code != "" {
@@ -171,15 +200,20 @@ func (g *Gate) forgetExpired(now time.Time) {
 // on the control sequences in what it prints: raw, a post could make the line
 // above the code say something other than what the code approves.
 func (a approval) notice() string {
+	return fmt.Sprintf("\n  APPROVE WRITE: %s\n%s  Code: %s  (approves this once, until %s)\n",
+		a.req.Action, a.req.describe(), a.code, a.expires.Format("15:04:05"))
+}
+
+// describe is the lines naming a request's post and text, quoted for the reason
+// notice gives.
+func (r Request) describe() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n  APPROVE WRITE: %s\n", a.req.Action)
-	if a.req.Target != "" {
-		fmt.Fprintf(&b, "  Post: %s\n", strconv.Quote(a.req.Target))
+	if r.Target != "" {
+		fmt.Fprintf(&b, "  Post: %s\n", strconv.Quote(r.Target))
 	}
-	if a.req.Text != "" {
-		fmt.Fprintf(&b, "  Text: %s\n", strconv.Quote(a.req.Text))
+	if r.Text != "" {
+		fmt.Fprintf(&b, "  Text: %s\n", strconv.Quote(r.Text))
 	}
-	fmt.Fprintf(&b, "  Code: %s  (approves this once, until %s)\n", a.code, a.expires.Format("15:04:05"))
 	return b.String()
 }
 
@@ -211,6 +245,13 @@ func (g *Gate) Banner() string {
 		return ""
 	}
 	var b strings.Builder
+	if g.AutoApproved() {
+		b.WriteString("\n  WRITES ENABLED, WITHOUT APPROVAL (-auto-approve)\n")
+		b.WriteString("  Every write goes ahead as soon as it is asked for. A post your agent\n")
+		b.WriteString("  reads can make it post, reply, like or repost as you. Each write is\n")
+		b.WriteString("  printed here and recorded in the audit log.\n")
+		return b.String()
+	}
 	b.WriteString("\n  WRITES ENABLED\n")
 	b.WriteString("  Each write shows its action here with a code that approves it once.\n")
 	b.WriteString("  Read the action before you give its code to your agent: a code is\n")

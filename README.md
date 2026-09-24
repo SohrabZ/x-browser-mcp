@@ -261,6 +261,13 @@ approved every write for the whole run would sit in that context after the first
 write, and any post could spend it. A code for one action cannot post anything
 else, and the terminal shows you what each code is for before you hand it over.
 
+If you accept that risk, start the server with `-auto-approve` as well. Every
+write then goes ahead without a code. The server still prints each write in its
+terminal, paces it, and marks it `auto_approved` in the audit log. But nothing
+stops a post your agent reads from making it post, reply, like or repost as
+you, so use it only with an agent that does not read X content in the same
+session as it writes.
+
 Also enforced:
 
 - A separate, much tighter budget than reads: 6/hour, at least 45s apart,
@@ -293,6 +300,7 @@ act as you.
 | `-profile`        | `Default`           | Chrome profile inside the state dir  |
 | `-headless`       | `true`              | run read browsers headless           |
 | `-allow-writes`   | `false`             | enable write tools                   |
+| `-auto-approve`   | `false`             | let writes through without a code (needs `-allow-writes`) |
 | `-fetch-timeout`  | `45s`               | budget for one read                  |
 | `-login-timeout`  | `5m`                | how long a login window stays open   |
 | `-allowed-host`   | none                | extra `Host` name to answer to (repeatable) |

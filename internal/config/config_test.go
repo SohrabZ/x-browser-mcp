@@ -43,6 +43,9 @@ func TestWritesAreDisabledByDefault(t *testing.T) {
 	if Default().AllowWrites {
 		t.Fatal("writes must be opt-in")
 	}
+	if Default().AutoApprove {
+		t.Fatal("skipping write approval must be opt-in")
+	}
 }
 
 func TestDefaultBindsToLoopback(t *testing.T) {
@@ -124,6 +127,7 @@ func TestValidateRejectsBadConfig(t *testing.T) {
 		"zero write":         func(c *Config) { c.WriteTimeout = 0 },
 		"empty read budget":  func(c *Config) { c.ReadPace.Max = 0 },
 		"empty write window": func(c *Config) { c.WritePace.Window = 0 },
+		"auto-approve alone": func(c *Config) { c.AllowWrites = false; c.AutoApprove = true },
 	}
 
 	for name, mutate := range cases {

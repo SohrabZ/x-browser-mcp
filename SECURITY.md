@@ -60,6 +60,11 @@ Text scraped from a web page cannot supply a code it has never seen. A code work
 once and only for its own action, so a code the user gave for one write cannot
 be spent on another by a post in the same context.
 
+`-auto-approve` turns the codes off. With it, the only thing between a post's
+instructions and your account is the model reading them. The pacing, the
+terminal notice and the audit log still apply, but they record a write after
+it happened. They do not prevent it.
+
 ### Session state is on disk
 
 The browser profile in `~/.x-browser-mcp/` holds live X session cookies,

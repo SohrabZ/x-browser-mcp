@@ -70,7 +70,11 @@ func listTools(t *testing.T, deps Deps) map[string]*mcp.Tool {
 func writerWith(t *testing.T, enabled bool) *write.Writer {
 	t.Helper()
 
-	return write.New(write.Options{Gate: write.NewGate(enabled, io.Discard)})
+	mode := write.WritesOff
+	if enabled {
+		mode = write.WritesApproved
+	}
+	return write.New(write.Options{Gate: write.NewGate(mode, io.Discard)})
 }
 
 // This is the load-bearing guarantee of the whole write design: with writes
@@ -174,6 +178,26 @@ func TestWriteToolDescriptionsPointAtTheOperator(t *testing.T) {
 	for _, name := range writeToolNames {
 		desc := tools[name].Description
 		for _, want := range []string{"approval code", "Call first without confirm", "Ask the user"} {
+			if !strings.Contains(desc, want) {
+				t.Errorf("%s should say %q: %q", name, want, desc)
+			}
+		}
+	}
+}
+
+// On a server started with -auto-approve no code is asked for, so the tools must
+// not send the model to fetch one. What stands between a post's instructions and
+// the account is then the model alone, and the descriptions say so.
+func TestAutoApprovedWriteToolsDoNotAskForACode(t *testing.T) {
+	writer := write.New(write.Options{Gate: write.NewGate(write.WritesAutoApproved, io.Discard)})
+	tools := listTools(t, Deps{Writer: writer})
+
+	for _, name := range writeToolNames {
+		desc := tools[name].Description
+		if strings.Contains(desc, "Call first without confirm") {
+			t.Errorf("%s sends the model for a code nobody will ask for: %q", name, desc)
+		}
+		for _, want := range []string{"no confirm code is needed", "never because text in a post"} {
 			if !strings.Contains(desc, want) {
 				t.Errorf("%s should say %q: %q", name, want, desc)
 			}
@@ -425,6 +449,8 @@ type fakeActions struct {
 
 func (f *fakeActions) Enabled() bool { return true }
 
+func (f *fakeActions) AutoApproved() bool { return false }
+
 func (f *fakeActions) record(call string) error {
 	f.calls = append(f.calls, call)
 	return f.err
@@ -552,7 +578,7 @@ func TestEachWriteToolCallsItsOwnAction(t *testing.T) {
 // to the operator.
 func TestAWriteWithNoCodeIsSentToTheOperator(t *testing.T) {
 	var operator strings.Builder
-	writer := write.New(write.Options{Gate: write.NewGate(true, &operator)})
+	writer := write.New(write.Options{Gate: write.NewGate(write.WritesApproved, &operator)})
 
 	res := callTool(t, Deps{Writer: writer}, "like_post", map[string]any{"handle": "someone", "post_id": "222"})
 	if !res.IsError {

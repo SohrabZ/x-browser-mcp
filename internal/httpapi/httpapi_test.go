@@ -182,6 +182,8 @@ type fakeWriter struct {
 
 func (f *fakeWriter) Enabled() bool { return f.enabled }
 
+func (f *fakeWriter) AutoApproved() bool { return false }
+
 func (f *fakeWriter) record(call string) error {
 	f.calls = append(f.calls, call)
 	return f.err
