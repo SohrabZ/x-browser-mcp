@@ -29,8 +29,10 @@ type Record struct {
 	Action  string    `json:"action"`
 	Target  string    `json:"target,omitempty"`
 	Excerpt string    `json:"excerpt,omitempty"`
-	Outcome Outcome   `json:"outcome"`
-	Reason  string    `json:"reason,omitempty"`
+	// Created is the id X gave the post or reply the write published.
+	Created string  `json:"created,omitempty"`
+	Outcome Outcome `json:"outcome"`
+	Reason  string  `json:"reason,omitempty"`
 }
 
 // Auditor appends write attempts to a file.

@@ -50,6 +50,9 @@ import each other.
   the page accepted and never sent looks identical to one that worked. Every
   engagement waits for the request, then reloads the post to confirm it survived.
   Three earlier versions of this check passed while the like was being discarded.
+  A new post or reply has no address to reload, so it waits for X's answer to the
+  request instead and takes the new post's id from where X's own client reads it.
+  No id is never reported as posted.
 - **Anything that disturbs the page inside that window cancels the request** —
   closing the browser, navigating, even reloading in order to check. A check
   written carelessly here *causes* the failure it is looking for.
