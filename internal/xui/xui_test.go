@@ -181,6 +181,37 @@ func TestImageOnlyPostConverts(t *testing.T) {
 	}
 }
 
+// A quoted card has no link to its own status, so it converts without an id; a
+// quote that asked for one would lose every quoted post.
+func TestAQuotedCardConvertsWithoutAnID(t *testing.T) {
+	raw := RawPost{
+		Href: "/quoter/status/1", Text: "so true", Handle: "@quoter",
+		Quoted: &RawPost{Text: "the claim", Handle: "@quoted", Name: "Quoted"},
+	}
+
+	post, ok := raw.ToPost()
+	if !ok || post.Quoted == nil {
+		t.Fatalf("expected the post and its quote, got ok=%v %+v", ok, post)
+	}
+	if q := post.Quoted; q.Author.Handle != "quoted" || q.Text != "the claim" || q.ID != "" || q.URL != "" {
+		t.Errorf("quoted = %+v, want @quoted's words with no id", q)
+	}
+}
+
+// A quote that adds nothing of its own still says what it quotes, so it is kept.
+// A card with nothing in it is not a quote, and does not save a post either.
+func TestAQuoteAloneIsEnoughAndAnEmptyCardIsNot(t *testing.T) {
+	quoting := RawPost{Href: "/a/status/1", Handle: "@a", Quoted: &RawPost{Text: "the claim", Handle: "@b"}}
+	if post, ok := quoting.ToPost(); !ok || post.Quoted == nil {
+		t.Errorf("a quote with no words of its own should convert, got ok=%v %+v", ok, post)
+	}
+
+	empty := RawPost{Href: "/a/status/1", Handle: "@a", Quoted: &RawPost{Handle: "@b"}}
+	if _, ok := empty.ToPost(); ok {
+		t.Error("an empty card gave a post with nothing in it a reason to be kept")
+	}
+}
+
 func TestPostWithNeitherTextNorMediaIsDropped(t *testing.T) {
 	raw := RawPost{Href: "/a/status/1", Handle: "@a"}
 

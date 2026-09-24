@@ -93,7 +93,7 @@ import each other.
   test passes either way without this.
 - **Writes must be verified against live X** before a release. The tool's own
   success report does not count — confirm from a fresh page load after the write
-  browser is gone. `TESTING.md` section 8 has the procedure and the reason it has
+  browser is gone. `TESTING.md` section 9 has the procedure and the reason it has
   to be indirect.
 - **Prove a test is not vacuous** by reverting the fix and watching it fail. Most
   of the guarantees here are about *not* doing something, and a test for that

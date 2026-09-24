@@ -41,6 +41,16 @@ func TestImageOnlyPostIsUsable(t *testing.T) {
 	}
 }
 
+// A quote that adds no words still says what it quotes. Dedupe filters on
+// Usable, so rejecting it here would drop it after the scraper had kept it.
+func TestAQuoteWithNothingOfItsOwnIsUsable(t *testing.T) {
+	p := Post{ID: "1", Author: Author{Handle: "a"}, Quoted: &Quote{Text: "the claim", Author: Author{Handle: "b"}}}
+
+	if !p.Usable() {
+		t.Fatal("a post carrying only a quote is complete content")
+	}
+}
+
 func TestPostWithNeitherTextNorMediaIsUnusable(t *testing.T) {
 	p := Post{ID: "1", Author: Author{Handle: "a"}}
 

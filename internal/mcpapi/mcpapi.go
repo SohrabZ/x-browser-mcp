@@ -387,24 +387,44 @@ func renderPosts(title string, res read.Result) string {
 // describe renders a post's content, falling back to its media when it has no
 // text. Rendering an image-only post as an empty string tells a model nothing;
 // naming the images at least says something is there.
+//
+// A quoted post follows in brackets, attributed to its own author, so the words
+// of a quote and of what it quotes are never run together as one account's.
 func describe(p model.Post, maxRunes int) string {
-	text := model.Excerpt(p.Text, maxRunes)
-	if p.Title != "" {
-		// An article's headline is the most useful line about it, so it leads.
-		text = strings.TrimSpace(p.Title + " — " + text)
+	text := content(p.Title, p.Text, p.Media, maxRunes)
+	if q := p.Quoted; q != nil {
+		quote := fmt.Sprintf("[quoting @%s: %s]", q.Author.Handle, content(q.Title, q.Text, q.Media, quotedRunes))
+		if text == "" {
+			return quote
+		}
+		return text + " " + quote
 	}
-	if len(p.Media) == 0 {
+	return text
+}
+
+// quotedRunes bounds a quoted post's text. It is context for the post that
+// quotes it, not the subject, so it gets less room.
+const quotedRunes = 160
+
+// content is describe without the quote, shared by a post and the one it quotes.
+func content(title, body string, media []model.Media, maxRunes int) string {
+	text := model.Excerpt(body, maxRunes)
+	if title != "" {
+		// An article's headline is the most useful line about it, so it leads.
+		text = strings.TrimSpace(title + " — " + text)
+	}
+	if len(media) == 0 {
 		return text
 	}
 
-	labels := make([]string, 0, len(p.Media))
-	for _, m := range p.Media {
+	labels := make([]string, 0, len(media))
+	for _, m := range media {
 		if m.Alt != "" {
 			labels = append(labels, m.Alt)
 		}
 	}
 
-	note := fmt.Sprintf("[%d image(s)", len(p.Media))
+	note := fmt.Sprintf("[%d image(s)", len(media))
 	if len(labels) > 0 {
 		note += ": " + model.Excerpt(strings.Join(labels, "; "), 120)
 	}
@@ -437,10 +457,22 @@ func renderNotifications(res read.NotificationResult) string {
 	return b.String()
 }
 
+// renderThread leads with the posts the root answers, marked as context, so a
+// model reading a reply sees what it was a reply to and cannot take either for
+// the other.
 func renderThread(thread model.Thread) string {
 	var b strings.Builder
 	b.WriteString(untrustedNotice)
-	fmt.Fprintf(&b, "@%s: %s\n\n", thread.Root.Author.Handle, thread.Root.Text)
+
+	if len(thread.Ancestors) > 0 {
+		b.WriteString("In reply to:\n")
+		for _, a := range thread.Ancestors {
+			fmt.Fprintf(&b, "  @%s: %s\n", a.Author.Handle, describe(a, 200))
+		}
+		b.WriteString("\n")
+	}
+
+	fmt.Fprintf(&b, "@%s: %s\n\n", thread.Root.Author.Handle, describe(thread.Root, rootRunes))
 
 	if len(thread.Replies) > 0 {
 		fmt.Fprintf(&b, "%d replies:\n", len(thread.Replies))
@@ -450,6 +482,10 @@ func renderThread(thread model.Thread) string {
 	}
 	return b.String()
 }
+
+// rootRunes is enough for the whole of any post the scraper returns, since the
+// root is the subject of a thread and is shown in full.
+const rootRunes = 6000
 
 func textResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}

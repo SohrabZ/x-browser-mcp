@@ -260,6 +260,46 @@ func TestRenderedThreadHandlesNoReplies(t *testing.T) {
 	}
 }
 
+// A reply read by its link shows what it answers, marked as context and before
+// it, so neither can be taken for the other.
+func TestRenderedThreadShowsWhatTheRootAnswers(t *testing.T) {
+	out := renderThread(model.Thread{
+		Ancestors: []model.Post{{Text: "the original post", Author: model.Author{Handle: "original"}}},
+		Root:      model.Post{Text: "the reply asked for", Author: model.Author{Handle: "replier"}},
+	})
+
+	context, root := strings.Index(out, "In reply to:"), strings.Index(out, "@replier: the reply asked for")
+	if context < 0 || root < 0 {
+		t.Fatalf("missing the context or the root:\n%s", out)
+	}
+	if at := strings.Index(out, "@original: the original post"); at < context || at > root {
+		t.Errorf("the ancestor should sit under 'In reply to:', above the root:\n%s", out)
+	}
+}
+
+// An image-only root is common -- visual self-threads start with one -- and was
+// rendered as a handle followed by nothing.
+func TestRenderedThreadNamesAnImageOnlyRootsImages(t *testing.T) {
+	out := renderThread(model.Thread{
+		Root: model.Post{Author: model.Author{Handle: "artist"}, Media: []model.Media{{URL: "https://pbs.twimg.com/a.jpg"}}},
+	})
+	if !strings.Contains(out, "@artist: [1 image(s)]") {
+		t.Errorf("the root's image should be named:\n%s", out)
+	}
+}
+
+// A quoted post is rendered under its own author, so a model is never shown the
+// quoted account's words as the quoter's.
+func TestRenderedQuoteKeepsTheQuotedAuthor(t *testing.T) {
+	out := renderPosts("Home", read.Result{Posts: []model.Post{{
+		ID: "1", Text: "so true", Author: model.Author{Handle: "quoter"},
+		Quoted: &model.Quote{Text: "the claim", Author: model.Author{Handle: "quoted"}},
+	}}})
+	if !strings.Contains(out, "@quoter: so true [quoting @quoted: the claim]") {
+		t.Errorf("the quote should be attributed to @quoted:\n%s", out)
+	}
+}
+
 // Long posts are truncated so one verbose post cannot crowd out the rest of a
 // batch in a token-limited context.
 func TestRenderedPostsTruncateLongText(t *testing.T) {

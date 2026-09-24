@@ -99,7 +99,26 @@ Expect the root plus 10 replies, each carrying one entry in `media` and an empty
 Note that X's own reply counter shows `1` for that post — self-thread replies do
 not count toward it, so the counter is not a check on this.
 
-### 4. Notifications and mentions
+### 4. Replies and quote posts
+
+A reply's permalink renders the posts it answers above it, and a quote post
+renders the post it quotes inside its own article. Both break extraction in a
+way that still looks like a correct answer:
+
+```bash
+curl -s 'http://127.0.0.1:18110/api/v1/thread/cupseycode/2102898430280409510?limit=3' \
+  | python3 -c 'import sys,json; t=json.load(sys.stdin); print([a["id"] for a in t.get("ancestors",[])], t["root"]["id"])'
+curl -s 'http://127.0.0.1:18110/api/v1/thread/brotendies/2102777814428909744?limit=3' \
+  | python3 -c 'import sys,json; r=json.load(sys.stdin)["root"]; print(r["created_at"], r["quoted"]["author"]["handle"])'
+```
+
+Expect the first to print `['2102726739449332221'] 2102898430280409510`: the
+post asked for as the root, with the post it answers as its ancestor. Expect the
+second to print a time after `2026-09-23T11:48:16Z`, which is when the quoted
+post was written, and `SamuelZengML` as the quoted author. That earlier time
+means the quote was dated from the post it quotes.
+
+### 5. Notifications and mentions
 
 These two look like one feature and are not. `/notifications` is mostly cells with
 no post in them, so it has its own extraction; `/notifications/mentions` is posts.
@@ -116,7 +135,7 @@ post extractor is being used and everything that is not a post has been dropped.
 `kind` is read from X's own words and will be empty under a non-English interface;
 `text` still says what happened.
 
-### 5. X Articles
+### 6. X Articles
 
 Long-form posts render nothing under `tweetText`; their headline and body live
 under their own testids, so this breaks separately from ordinary posts:
@@ -129,7 +148,7 @@ curl -s 'http://127.0.0.1:18110/api/v1/thread/Alfred_Lin/2084636778791858256?lim
 Expect a non-empty `title` and a body of a few thousand characters. An empty
 `text` means the article selectors have drifted.
 
-### 6. End-to-end check with an agent
+### 7. End-to-end check with an agent
 
 Connectivity first:
 
@@ -188,7 +207,7 @@ claude -p "Use the x-browser-mcp tools to read my X home timeline (5 posts). \
 - **A tool the client cannot see** — after adding a tool, clients discover it on
   a fresh session. Re-run `hermes mcp test` to confirm the count changed.
 
-### 7. Write gating
+### 8. Write gating
 
 ```bash
 ./x-browser-mcp -allow-writes
@@ -211,7 +230,7 @@ curl -s -X POST http://127.0.0.1:18110/mcp \
 
 Only test writes against an account you are willing to post from.
 
-### 8. Writes that actually take effect
+### 9. Writes that actually take effect
 
 The gate checks above pass whether or not a write does anything. Check the
 action separately, and check it the only way that works:

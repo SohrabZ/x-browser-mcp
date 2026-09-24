@@ -59,6 +59,13 @@ func (c *cache[T]) put(key string, result T) {
 	c.entries[key] = entry[T]{result: result, expires: time.Now().Add(c.ttl)}
 }
 
+// drop forgets one result.
+func (c *cache[T]) drop(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, key)
+}
+
 // Invalidate drops every cached result. Writes call this, since posting or
 // liking changes what a subsequent read should return.
 func (c *cache[T]) Invalidate() {
