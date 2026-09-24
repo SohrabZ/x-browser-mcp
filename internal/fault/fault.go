@@ -94,6 +94,8 @@ func Describe(err error) (Kind, string) {
 	switch {
 	case errors.Is(err, write.ErrDisabled):
 		return Refused, write.ErrDisabled.Error()
+	case errors.Is(err, write.ErrApprovalRequired):
+		return Refused, write.ErrApprovalRequired.Error()
 	case errors.Is(err, write.ErrBadConfirmation):
 		return Refused, write.ErrBadConfirmation.Error()
 	case errors.Is(err, auth.ErrLoginRequired):

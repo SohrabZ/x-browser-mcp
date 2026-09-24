@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"runtime/debug"
 	"strings"
@@ -69,11 +70,7 @@ func listTools(t *testing.T, deps Deps) map[string]*mcp.Tool {
 func writerWith(t *testing.T, enabled bool) *write.Writer {
 	t.Helper()
 
-	gate, err := write.NewGate(enabled)
-	if err != nil {
-		t.Fatalf("new gate: %v", err)
-	}
-	return write.New(write.Options{Gate: gate})
+	return write.New(write.Options{Gate: write.NewGate(enabled, io.Discard)})
 }
 
 // This is the load-bearing guarantee of the whole write design: with writes
@@ -142,10 +139,10 @@ func TestReadToolsAreAlwaysRegistered(t *testing.T) {
 	}
 }
 
-// Every write tool must require the confirmation token in its schema. Without
-// it the SDK would accept a call with no token and the request would reach the
-// gate carrying an empty string.
-func TestWriteToolsRequireConfirmationInTheirSchema(t *testing.T) {
+// Every write tool takes the approval code, and none may require it. The first
+// call of every write carries no code -- that call is what shows the operator
+// one -- so a schema requiring it would push a model into inventing a value.
+func TestWriteToolsTakeTheApprovalCodeWithoutRequiringIt(t *testing.T) {
 	tools := listTools(t, Deps{Writer: writerWith(t, true)})
 
 	for _, name := range writeToolNames {
@@ -157,31 +154,29 @@ func TestWriteToolsRequireConfirmationInTheirSchema(t *testing.T) {
 			t.Errorf("%s has no input schema", name)
 			continue
 		}
-		var required bool
+		if _, ok := tool.InputSchema.Properties["confirm"]; !ok {
+			t.Errorf("%s has no confirm field for the code", name)
+		}
 		for _, field := range tool.InputSchema.Required {
 			if field == "confirm" {
-				required = true
-				break
+				t.Errorf("%s requires confirm, which the first call cannot have", name)
 			}
-		}
-		if !required {
-			t.Errorf("%s must require a confirm token, got required=%v", name, tool.InputSchema.Required)
 		}
 	}
 }
 
 // The descriptions are what a model reads when deciding how to call a tool, so
-// they must send it to the user for the token rather than inviting a guess.
+// they must walk it through asking for a code and send it to the user for one
+// rather than inviting a guess.
 func TestWriteToolDescriptionsPointAtTheOperator(t *testing.T) {
 	tools := listTools(t, Deps{Writer: writerWith(t, true)})
 
 	for _, name := range writeToolNames {
 		desc := tools[name].Description
-		if !strings.Contains(desc, "confirmation token") {
-			t.Errorf("%s should mention the confirmation token: %q", name, desc)
-		}
-		if !strings.Contains(desc, "Ask the user") {
-			t.Errorf("%s should tell the model to ask the user: %q", name, desc)
+		for _, want := range []string{"approval code", "Call first without confirm", "Ask the user"} {
+			if !strings.Contains(desc, want) {
+				t.Errorf("%s should say %q: %q", name, want, desc)
+			}
 		}
 	}
 }
@@ -506,6 +501,31 @@ func TestEachWriteToolCallsItsOwnAction(t *testing.T) {
 
 // A refused or failed write has to come back as an error the model can see,
 // not as a success with an apology in the text.
+// The first call of a write carries no code. It has to reach the gate through a
+// real client -- a schema that required the field would refuse it first -- and
+// come back telling the model where the code is, while the code itself goes only
+// to the operator.
+func TestAWriteWithNoCodeIsSentToTheOperator(t *testing.T) {
+	var operator strings.Builder
+	writer := write.New(write.Options{Gate: write.NewGate(true, &operator)})
+
+	res := callTool(t, Deps{Writer: writer}, "like_post", map[string]any{"handle": "someone", "post_id": "222"})
+	if !res.IsError {
+		t.Fatal("a write with no code must not report success")
+	}
+	said := textOf(t, res)
+	if !strings.Contains(said, "approval required") {
+		t.Errorf("the model was told %q; it should be sent to the user for the code", said)
+	}
+	if !strings.Contains(operator.String(), "APPROVE WRITE: like") {
+		t.Fatalf("the operator was not asked:\n%s", operator.String())
+	}
+	code := operator.String()[strings.Index(operator.String(), "Code: ")+len("Code: "):][:16]
+	if strings.Contains(said, code) {
+		t.Error("the code was handed to the model, which is the one place it must not go")
+	}
+}
+
 func TestAFailedWriteToolReportsAnError(t *testing.T) {
 	writer := &fakeActions{err: &write.NotAppliedError{Reason: "like did not stick"}}
 	res := callTool(t, Deps{Writer: writer},

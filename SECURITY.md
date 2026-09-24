@@ -53,10 +53,12 @@ context as your agent's instructions. A post can contain text designed to be
 read as a command. Tool responses label the content as untrusted, and that is a
 mitigation, not a guarantee.
 
-This is why write actions are disabled by default, are not registered as tools
-at all when disabled, and require a confirmation token minted at startup and
-shown only in the operator's terminal — text scraped from a web page cannot
-supply a value it has never seen.
+This is why write actions are disabled by default, and are not registered as
+tools at all when disabled. When enabled, each write needs an approval code that
+the server prints in the operator's terminal next to the action it approves.
+Text scraped from a web page cannot supply a code it has never seen. A code works
+once and only for its own action, so a code the user gave for one write cannot
+be spent on another by a post in the same context.
 
 ### Session state is on disk
 
@@ -67,7 +69,7 @@ directory as your user can act as you on X.
 
 ## Scope
 
-In scope: authentication bypass, unintended write execution, confirmation-token
+In scope: authentication bypass, unintended write execution, approval-code
 bypass, session-state disclosure, and anything that lets a remote or web-based
 caller reach the API.
 

@@ -17,6 +17,10 @@ const (
 	OutcomeOK     Outcome = "ok"
 	OutcomeDenied Outcome = "denied"
 	OutcomeFailed Outcome = "failed"
+
+	// OutcomePending is a write that asked for approval and was shown to the
+	// operator. Every write begins this way, so it is not a denial.
+	OutcomePending Outcome = "approval_requested"
 )
 
 // Record is one line of the audit log.

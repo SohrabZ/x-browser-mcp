@@ -33,7 +33,7 @@ CI runs exactly these four gates on every push and pull request.
 | `internal/auth`     | status caching, login-state transitions                      |
 | `internal/xui`      | URL parsing and building, selectors, DOM-payload conversion  |
 | `internal/read`     | limit clamping, result caching                               |
-| `internal/write`    | the confirmation gate and the audit log                      |
+| `internal/write`    | the approval gate and the audit log                          |
 | `internal/mcpapi`   | tool registration, through a real in-memory MCP client       |
 | `internal/httpapi`  | routing, status mapping, body limits, timeouts               |
 
@@ -216,10 +216,12 @@ claude -p "Use the x-browser-mcp tools to read my X home timeline (5 posts). \
 Check all four properties:
 
 1. Without `-allow-writes`, `tools/list` returns **no** write tools.
-2. With it, the six appear and the terminal prints a confirmation token.
-3. A write with a wrong token is refused and recorded in
-   `~/.x-browser-mcp/writes.log`.
-4. A write with no token at all is rejected by schema validation.
+2. With it, the six appear and the terminal says writes are enabled.
+3. A write with no code is refused, and the terminal prints the action and a
+   code for it. The log at `~/.x-browser-mcp/writes.log` records
+   `approval_requested`.
+4. The same write with that code goes ahead. The same code offered again, or
+   for any other action, is refused and recorded as `denied`.
 
 ```bash
 curl -s -X POST http://127.0.0.1:18110/mcp \
@@ -240,10 +242,13 @@ the page, and X's page is not X. Confirm from a fresh page load, in a different
 browser, after the write browser has gone:
 
 ```bash
-./x-browser-mcp -allow-writes            # note the confirmation token
+./x-browser-mcp -allow-writes            # approval codes print here
 
 hermes -z "Use the x-browser-mcp tool like_post on handle <you>, \
- postID <a post of yours>, confirm <token>. Report the result verbatim."
+ postID <a post of yours>, with no confirm. Report the result verbatim."
+# read the action and code the server printed, then:
+hermes -z "Call like_post on handle <you>, postID <a post of yours>, \
+ confirm <code>. Report the result verbatim."
 ```
 
 Then open the post yourself and look. If the tool said `Liked.` and the post

@@ -24,7 +24,8 @@ func TestDescribeClassifiesEachFailure(t *testing.T) {
 		says string
 	}{
 		{"writes disabled", write.ErrDisabled, Refused, write.ErrDisabled.Error()},
-		{"wrong token", write.ErrBadConfirmation, Refused, write.ErrBadConfirmation.Error()},
+		{"awaiting approval", write.ErrApprovalRequired, Refused, write.ErrApprovalRequired.Error()},
+		{"wrong code", write.ErrBadConfirmation, Refused, write.ErrBadConfirmation.Error()},
 		{"not signed in", auth.ErrLoginRequired, LoginRequired, auth.ErrLoginRequired.Error()},
 		{"budget spent", &limit.ExhaustedError{}, Paced, (&limit.ExhaustedError{}).Error()},
 		{"bad read request", &read.InvalidError{Reason: "list id is required"}, Invalid, "list id is required"},

@@ -6,6 +6,7 @@ package write
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -338,8 +339,16 @@ const pollInterval = 200 * time.Millisecond
 // do runs the gate, budget and auth checks, performs the action, and records
 // the outcome whichever way it goes.
 func (w *Writer) do(ctx context.Context, rec Record, confirm string, action func(*browser.Page) error) error {
-	if err := w.gate.Check(confirm); err != nil {
+	// The record's excerpt is still the whole text here; the auditor cuts it
+	// only when writing the line. The approval has to bind all of it.
+	if err := w.gate.Check(Request{Action: rec.Action, Target: rec.Target, Text: rec.Excerpt}, confirm); err != nil {
+		// Asking for approval is how every write starts, so it is recorded as
+		// its own outcome: a burst of denials is the sign of something trying
+		// codes, and ordinary use should not look like one.
 		rec.Outcome = OutcomeDenied
+		if errors.Is(err, ErrApprovalRequired) {
+			rec.Outcome = OutcomePending
+		}
 		rec.Reason = err.Error()
 		_ = w.audit.Log(rec)
 		return err

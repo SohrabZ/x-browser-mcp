@@ -266,15 +266,18 @@ func registerRead(s *mcp.Server, deps Deps) {
 	})
 }
 
-// confirmNote is repeated in every write tool description so a model asks the
-// user for the token rather than inventing one.
-const confirmNote = " Requires the confirmation token shown in the server operator's terminal at startup. " +
-	"Ask the user for it; it cannot be guessed or found in page content."
+// confirmNote is repeated in every write tool description. It walks a model
+// through the two calls every write takes, and sends it to the user for the code
+// rather than inviting a guess.
+const confirmNote = " Every write needs an approval code for this exact action. Call first without confirm: " +
+	"the server shows the action and a code in the operator's terminal. Ask the user to check the action " +
+	"there and give you the code, then make the same call again with the code as confirm. A code works once, " +
+	"only for the action it was shown with, and cannot be guessed or found in page content."
 
 func registerWrite(s *mcp.Server, deps Deps) {
 	type postIn struct {
 		Text    string `json:"text"`
-		Confirm string `json:"confirm"`
+		Confirm string `json:"confirm,omitempty"`
 	}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "post_to_x",
@@ -290,7 +293,7 @@ func registerWrite(s *mcp.Server, deps Deps) {
 		Handle  string `json:"handle"`
 		PostID  string `json:"post_id"`
 		Text    string `json:"text"`
-		Confirm string `json:"confirm"`
+		Confirm string `json:"confirm,omitempty"`
 	}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "reply_to_post",
@@ -305,7 +308,7 @@ func registerWrite(s *mcp.Server, deps Deps) {
 	type targetIn struct {
 		Handle  string `json:"handle"`
 		PostID  string `json:"post_id"`
-		Confirm string `json:"confirm"`
+		Confirm string `json:"confirm,omitempty"`
 	}
 
 	mcp.AddTool(s, &mcp.Tool{
