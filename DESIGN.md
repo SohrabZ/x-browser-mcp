@@ -154,7 +154,9 @@ against user error.
    is recoverable by hand.
 
 Read tools additionally wrap returned post text in explicit untrusted-content
-delimiters and say so in their descriptions.
+delimiters and say so in their descriptions. The JSON copy of each result, which
+MCP clients may give the model instead of the text, carries the same notice in
+its `notice` field.
 
 ## Rate limiting
 
